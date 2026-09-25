@@ -1,0 +1,256 @@
+﻿---@diagnostic disable: undefined-doc-name
+
+local MODULE_NAME = "SkuCore"
+SkuCore = SkuCore or LibStub("AceAddon-3.0"):NewAddon("SkuCore", "AceConsole-3.0", "AceEvent-3.0")
+local L = Sku.L
+
+-- W4 Phase D: Mail is a real AceAddon SUBMODULE of SkuCore so it can be turned
+-- on/off at runtime.
+-- W4 Phase E (namespace extraction): all of Mail's own methods and module state
+-- now live on the module table `Mail` itself (function Mail:Method) instead of on
+-- the shared SkuCore god-object. The module mixes in AceEvent-3.0 and owns its own
+-- event registrations; external callers use the published handle SkuCore.Mail.
+-- Lifecycle:
+--   * OnEnable  arms the mailbox (registers the 10 MAIL_* events on the module via
+--     AceEvent + installs the UIErrorsFrame hook once). This replaces the old
+--     explicit SkuCore:MailOnInitialize() call in Core.lua, so mail now re-arms on
+--     every /reload, not only on the initial login.
+--   * OnDisable unregisters all the module's events (the hooksecurefunc hook cannot
+--     be removed, so its body is guarded with IsEnabled()).
+-- Settings/SavedVariables shape is unchanged.
+local Mail = SkuCore:NewModule("Mail", "AceEvent-3.0")
+SkuCore.Mail = Mail   -- keep the published handle
+
+-- Make this feature user-toggleable (Features menu + persisted on/off).
+SkuCore:RegisterToggleableModule("Mail", function()
+	return Sku.deEn("Post", "Mail", "Courrier")
+end)
+
+local gLastError = ""
+local gLastErrorTime = 0
+
+-- The UIErrorsFrame hook is installed once and never removed (hooksecurefunc
+-- hooks are permanent); it is a no-op while the feature is disabled.
+local gMailHookInstalled = false
+
+------------------------------------------------------------------------------------------------------------
+-- Arm the feature. Called by AceAddon when the module is enabled (at SkuCore
+-- enable, and whenever the user toggles it back on). Body = the old
+-- MailOnInitialize arming.
+function Mail:OnEnable()
+	Mail:RegisterEvent("MAIL_SHOW", "MAIL_SHOW")
+	Mail:RegisterEvent("MAIL_INBOX_UPDATE", "MAIL_INBOX_UPDATE")
+	Mail:RegisterEvent("MAIL_CLOSED", "MAIL_CLOSED")
+	Mail:RegisterEvent("MAIL_SEND_SUCCESS", "MAIL_SEND_SUCCESS")
+	Mail:RegisterEvent("MAIL_FAILED", "MAIL_FAILED")
+
+   if not gMailHookInstalled then
+      gMailHookInstalled = true
+      hooksecurefunc(UIErrorsFrame, "AddMessage", function(self, text, r, g, b, messageGroup, holdTime)
+         if not Mail:IsEnabled() then return end
+         gLastError = text
+         gLastErrorTime = (_G.GetTime and GetTime()) or 0
+      end)
+   end
+end
+
+-- Disarm the feature: unregister all 10 MAIL_* events so a disabled Mail does
+-- nothing. The UIErrorsFrame hook stays installed but is gated by IsEnabled().
+function Mail:OnDisable()
+	Mail:UnregisterAllEvents()
+end
+
+------------------------------------------------------------------------------------------------------------
+local MailboxOpenFlag = false
+
+-- [v42.11] Steht der Nutzer gerade IM Post-Menue? Der Post-Zweig haengt als
+-- Local-Fensterbeitrag (SkuCore.localWindowContributors, Knotenname = L["Mail"])
+-- unter "Lokal"; wir laufen die Elternkette hoch und suchen genau diesen Knoten.
+-- Nur dort darf ein Posteingangs-Update das Menue neu aufbauen -- der generische
+-- OnUpdate (SkuZOptions/templates.lua) verwirft die Kinder der aktuellen Ebene,
+-- baut sie neu UND spricht den aktuellen Eintrag erneut aus. Auf einem fremden
+-- Zweig ist das kein Refresh, sondern ein Fremdeingriff mit Sprachausgabe.
+local function tCursorIsInMailMenu()
+   local tNode = SkuOptions and SkuOptions.currentMenuPosition
+   while tNode do
+      if tNode.name == L["Mail"] then
+         return true
+      end
+      tNode = tNode.parent
+   end
+   return false
+end
+
+function Mail:MAIL_SHOW(...)
+   --print("MAIL_SHOW", ...)
+   SkuOptions:SlashFunc(Sku.MENU_ROOT..","..L["Local"]..","..L["Mail"])
+   MailboxOpenFlag = true
+   pcall(function() if SkuCore and SkuCore.ScheduleMenuFlashRecheck then SkuCore:ScheduleMenuFlashRecheck() end end)
+end
+
+------------------------------------------------------------------------------------------------------------
+-- [v42.11] MAIL_INBOX_UPDATE kommt NICHT nur am geoeffneten Briefkasten: der Server
+-- schickt es auch, wenn spaeter neue Post eintrifft oder der Posteingang sonstwie
+-- aktualisiert wird. Frueher lief das ungebremst in den generischen OnUpdate --
+-- und weil MailboxOpenFlag nirgends zurueckgesetzt wurde (MAIL_CLOSED hat es nie
+-- geloescht), galt "Briefkasten offen" ab dem ersten Besuch bis zum /reload. Ergebnis:
+-- irgendwann NACH dem Absenden eines Briefes baute Sku das Menue an beliebiger
+-- Stelle neu auf und las den aktuellen Eintrag erneut vor -- bei einem Brieffeld
+-- also den gerade eingegebenen Text. Ohne Menue-Position wurde sogar zwangsweise
+-- das Post-Menue aufgerissen (Invariante: ein Hintergrund-Ereignis darf das Menue
+-- nie aufzwingen).
+-- Jetzt: nur waehrend der Briefkasten wirklich sichtbar ist UND der Cursor im
+-- Post-Zweig steht. Sonst passiert nichts -- der Zweig ist dynamisch und baut sich
+-- beim naechsten Abstieg ohnehin frisch auf.
+function Mail:MAIL_INBOX_UPDATE(...)
+   --print("MAIL_INBOX_UPDATE", ...)
+   if MailboxOpenFlag ~= true then
+      return
+   end
+   if not (_G.MailFrame and MailFrame:IsVisible()) then
+      return
+   end
+   if SkuOptions.currentMenuPosition then
+      if tCursorIsInMailMenu() then
+         SkuOptions.currentMenuPosition:OnUpdate(SkuOptions.currentMenuPosition)
+      end
+   else
+      SkuOptions:SlashFunc(Sku.MENU_ROOT..","..L["Local"]..","..L["Mail"])
+   end
+end
+
+------------------------------------------------------------------------------------------------------------
+function Mail:MAIL_CLOSED(...)
+   --dprint("MAIL_CLOSED", ...)
+   -- [v42.11] Briefkasten wieder als geschlossen merken -- fehlte, siehe
+   -- MAIL_INBOX_UPDATE.
+   MailboxOpenFlag = false
+   if #SkuOptions.Menu == 0 or SkuOptions:IsMenuOpen() == false then
+      _G["OnSkuOptionsMain"]:GetScript("OnClick")(_G["OnSkuOptionsMain"], SkuOptions.db.profile["SkuOptions"].SkuKeyBinds["SKU_KEY_OPENMENU"].key)
+   end
+end
+
+------------------------------------------------------------------------------------------------------------
+function Mail:MAIL_SEND_SUCCESS(...)
+   --dprint("MAIL_SEND_SUCCESS", ...)
+   -- [v42.11] Ueberschreibend (frueher: anhaengend). "Gesendet" ist die Quittung auf
+   -- eine gerade ausgeloeste Aktion und muss SOFORT kommen; angehaengt stand sie
+   -- hinter allem, was noch in der Queue lag -- nach einem laengeren Brieftext waren
+   -- das womoeglich hunderte Einzelzeichen aus dem Tipp-Vorlesen.
+   -- [v43.1] ...aber nur, solange der Briefkasten noch OFFEN ist. Das Event ist
+   -- eine Server-Antwort: wer nach "Senden" sofort das Menue schliesst (ESC
+   -- schliesst auch den Briefkasten) oder weglaeuft, bekam "Gesendet" erst NACH
+   -- dem Schliessen -- Nutzerbericht "Ansagen aus dem Briefkasten, obwohl er zu
+   -- ist". Die Server-Systemzeile ("Post verschickt.") laeuft ohnehin ueber den
+   -- Chat. Unterdruecken, nicht nachreichen (siehe Handels-Regel: nie erfinden).
+   if MailboxOpenFlag == true then
+      SkuOptions.Voice:OutputStringBTtts(L["Sent"], true, true, 0.2)
+   end
+   -- [v42.08] Erst bei tatsaechlichem Erfolg den Entwurf leeren (frueher wurde er
+   -- optimistisch direkt nach SendMail geleert -> bei Fehlschlag verloren). Danach
+   -- zurueck auf den Brief-Eintrag; die Kinder werden beim naechsten Abstieg mit
+   -- frischen, leeren Beschriftungen neu gebaut.
+   local tLetter = Mail.gPendingCompose
+   Mail.gPendingCompose = nil
+   if tLetter then
+      tLetter.TmpTo = nil
+      tLetter.TmpSubject = nil
+      tLetter.TmpBody = nil
+      tLetter.TmpMoneyCfg = nil
+      tLetter.TmpItemsLock = nil
+      if _G.C_Timer and _G.C_Timer.After then
+         C_Timer.After(0.3, function()
+            if SkuOptions then
+               SkuOptions.currentMenuPosition = tLetter
+               if SkuOptions.VocalizeCurrentMenuName then
+                  pcall(function() SkuOptions:VocalizeCurrentMenuName() end)
+               end
+            end
+         end)
+      end
+   end
+end
+
+------------------------------------------------------------------------------------------------------------
+-- [v42.08] Senden fehlgeschlagen (Empfaenger unbekannt, Postfach voll, ignoriert...).
+-- Der Grund kommt als roter UI-Fehler (UIErrorsFrame) und liegt dann in gLastError.
+-- Wir sagen eine klare Fehlermeldung an -- samt Grund, WENN der zuletzt gesehene
+-- UI-Fehler frisch ist (< 2 s, also zu diesem Sendeversuch gehoert) -- und lassen
+-- den Entwurf stehen (nicht wie bei Erfolg geleert), damit der Nutzer nur den Namen
+-- korrigieren und erneut senden kann.
+function Mail:MAIL_FAILED(...)
+   local tMsg = Sku.deEn("Senden fehlgeschlagen", "Send failed", "Échec de l'envoi")
+   if type(gLastError) == "string" and gLastError ~= ""
+      and _G.GetTime and (GetTime() - gLastErrorTime) < 2 then
+      tMsg = tMsg..": "..gLastError
+   end
+   SkuOptions.Voice:OutputStringBTtts(tMsg, false, true, 0.2)
+   -- Entwurf bleibt erhalten; nur die Merker fuer den naechsten Versuch loeschen.
+   gLastError = ""
+   Mail.gPendingCompose = nil
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- Ein normales Eingabefeld fuer ein Mail-Textfeld (Empfaenger / Betreff / Text).
+-- Der Nutzer tippt und bestaetigt mit ENTER (EditBoxShow ruft dann den Callback
+-- und schliesst die Box) -- das urspruengliche, vertraute Verhalten, statt der
+-- kombinierten Tab-Eingabe.
+--   aTargetValue : Feldname auf dem Brief-Eintrag (TmpTo / TmpSubject / TmpBody).
+--   aLabelPrefix : optionale Beschriftung; nach der Eingabe wird der Feld-Eintrag
+--                  auf "<Beschriftung>: <Wert>" gesetzt und vorgelesen -- hoerbare
+--                  Bestaetigung fuer Screenreader-Nutzer.
+-- Ziel-Eintrag und Feld-Eintrag werden JETZT (vor dem Oeffnen der Box) festgehalten
+-- statt im Callback ueber currentMenuPosition gelesen: der Feld-Eintrag ist ein Kind
+-- des Brief-Eintrags, und die Tmp-Werte liegen auf dem Brief-Eintrag (parent).
+function Mail:MailEditor(aTargetValue, aLabelPrefix)
+	PlaySound(88)
+	SkuOptions.Voice:OutputStringBTtts(L["Enter text and press ENTER key"], false, true, 0.2)
+
+	local tFieldEntry = SkuOptions.currentMenuPosition
+	local tTarget = (tFieldEntry and tFieldEntry.parent) or tFieldEntry
+
+	SkuOptions:EditBoxShow(tTarget[aTargetValue] or "", function(self)
+		PlaySound(89)
+		local tText = strtrim(SkuOptionsEditBoxEditBox:GetText() or "")
+		tTarget[aTargetValue] = (tText ~= "") and tText or nil
+
+		if aLabelPrefix and tFieldEntry then
+			tFieldEntry.name = aLabelPrefix..(tTarget[aTargetValue] and (": "..tTarget[aTargetValue]) or "")
+		end
+
+		-- Cursor auf dem gerade bearbeiteten Feld halten. Der Enter-Klick, der die
+		-- Box geoeffnet hat, hat den Menue-Cursor bereits eine Ebene hoch auf den
+		-- Brief-Eintrag gestellt (templates.lua OnPostSelect -> currentMenuPosition =
+		-- parent). Ohne dieses Re-Pinnen landet der Nutzer nach der Eingabe auf
+		-- "Neuer Brief" statt auf dem Feld. Gleiches Muster wie beim Anhaengen.
+		local function tRepin()
+			if SkuOptions then SkuOptions.currentMenuPosition = tFieldEntry end
+		end
+		tRepin()
+		if _G.C_Timer and _G.C_Timer.After then
+			_G.C_Timer.After(0.02, tRepin)
+			_G.C_Timer.After(0.10, tRepin)
+			_G.C_Timer.After(0.30, function()
+				tRepin()
+				if aLabelPrefix and tFieldEntry then
+					-- [v43.1] Nicht mehr sprechen, wenn das Menue inzwischen ZU ist:
+					-- diese Bestaetigung enthaelt den getippten Freitext -- nach dem
+					-- Schliessen klang das wie "Tastatur-Echo nach Menue-Ende"
+					-- (Nutzerbericht). Gleiche Regel wie der zentrale Schutz in
+					-- SkuOptions:VocalizeCurrentMenuName.
+					if not (SkuOptions and SkuOptions.IsMenuOpen) or SkuOptions:IsMenuOpen() ~= true then
+						return
+					end
+					-- engine 2 = Blizzard TTS, immer: der Wert ist Freitext (Spielername,
+					-- Betreff, Brieftext), den die Sku-Audiodatenbank nicht kennt.
+					-- [v42.11] Ueberschreibend: die Bestaetigung des Feldes ist das, was der
+					-- Nutzer JETZT hoeren will -- nicht erst hinter dem zeichenweisen
+					-- Vorlesen des gerade Getippten.
+					SkuOptions.Voice:OutputStringBTtts(tFieldEntry.name, true, true, 0.2, nil, nil, nil, 2)
+				end
+			end)
+		elseif aLabelPrefix and tFieldEntry then
+			SkuOptions.Voice:OutputStringBTtts(tFieldEntry.name, true, true, 0.2, nil, nil, nil, 2)
+		end
+	end)
+end

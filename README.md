@@ -1,26 +1,28 @@
-# WoW Forever – Anpassungen für Sku
+# Sku für WoW Forever
 
-Änderungen am **Sku**-Addon (Screenreader-Addon für blinde und sehbehinderte
-WoW-Spieler), damit es auf **WoW Forever** läuft (Blizzards neuer Classic-Client,
-intern „Camelot", Interface 16001).
-
-Dieses Repository enthält **nur die geänderten Dateien** von Sku 43.8, nicht das
-ganze Addon.
+Das **Sku**-Addon (Screenreader-Addon für blinde und sehbehinderte WoW-Spieler),
+angepasst für **WoW Forever** (Blizzards neuer Classic-Client, intern „Camelot",
+Interface 16001). Basis ist Sku 43.8.
 
 Original: <https://github.com/Sku75/Sku-WoW-Addon-TBC> (Sku75).
 Lizenz: GPL v3, siehe `LICENSE.txt`. Alle Änderungen stehen unter derselben Lizenz.
 
 ## Installation
 
-1. Das originale Sku-Addon (Version 43.8) installieren.
-2. Den Ordner `Sku` aus diesem Repository über den installierten Ordner
-   `Interface/AddOns/Sku` kopieren, vorhandene Dateien überschreiben.
-3. Die Datei `SkuCore/aq.lua` löschen (der Heilmonitor ist auf Forever nicht
-   möglich, siehe unten). Die Zeile dazu in `Sku.toc` ist bereits auskommentiert.
-4. Im Spiel nach jedem Login einmal **Shift-F1** drücken (Menü kurz auf und zu),
+Der Ordner `Sku` in diesem Repository ist das **komplette Addon**. Einfach
+kopieren und einfügen:
+
+1. Den Ordner `Sku` in den Forever-AddOn-Ordner kopieren, zum Beispiel
+   `World of Warcraft/_classic_beta_/Interface/AddOns/`. Ein vorhandener
+   `Sku`-Ordner wird dabei ersetzt.
+2. Die Zusatz-Addons von Sku (`SkuAudioData_en`, `SkuAudioData_fast_de`,
+   `SkuBeaconSoundsets`, `SkuCustomBeaconsAdditional`, `SkuCustomBeaconsEssential`)
+   sind **nicht** enthalten. Sie sind unverändert und kommen aus der originalen
+   Sku-Auslieferung.
+3. Im Spiel nach jedem Login einmal **Shift-F1** drücken (Menü kurz auf und zu),
    sonst bleiben andere Sku-Tasten beim ersten Versuch stumm.
 
-## Was sich geändert hat
+## Was gegenüber dem Original geändert wurde
 
 WoW Forever hat viele alte Funktionen entfernt oder umbenannt und schützt
 Gesundheits- und Ressourcenwerte („geheime Werte"), sodass Addons nicht damit
@@ -51,3 +53,15 @@ rechnen können. Die Anpassungen:
 In Arbeit, getestet mit einem Magier im Startgebiet. Bekannte offene Punkte:
 Fertigkeiten-Anzeige (keine Waffenstufen mehr auf Forever), Auswahl-Belohnungen im
 Questbuch, einzelne Fehler bei geheimen Werten im Kampf.
+
+## Geänderte Dateien (gegenüber Sku 43.8)
+
+`Core.lua`, `Sku.toc`, `SkuUtil.lua`, `Libs/AceEvent-3.0/AceEvent-3.0.lua`,
+`Libs/SkuVoice-1.0/SkuVoice-1.0.lua`, `SkuAuras/Core.lua`, `SkuChat/Core.lua`,
+`SkuChat/Options.lua`, `SkuCore/Core.lua`, `SkuCore/LocalMenu.lua`, `SkuCore/Options.lua`,
+`SkuCore/aqCombat.lua`, `SkuCore/gameOptions.lua`, `SkuCore/equipmentSets.lua`,
+`SkuCore/alIntegration.lua`, `SkuCore/auctionHouse.lua`, `SkuCore/JunkAndRepair.lua`,
+`SkuCore/pawnIntegration.lua`, `SkuMob/Core.lua`, `SkuNav/specialNavigationTasks.lua`,
+`SkuQuest/Core.lua`, `SkuQuest/Options.lua`, `SkuZOptions/Core.lua`,
+`SkuZOptions/Options.lua`, `SkuZOptions/SkuMenu.lua`, `SkuZOptions/utilities.lua`.
+Entfernt: `SkuCore/aq.lua` (Heilmonitor, auf Forever nicht möglich).
