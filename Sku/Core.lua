@@ -1,0 +1,1843 @@
+﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+
+
+-- C_Engraving (Season of Discovery rune sockets) does not exist on every
+-- client (e.g. WoW Forever/Camelot). Without this guard the override below
+-- throws at file scope, before Sku = {} runs, which leaves the Sku global
+-- nil for every other file in the addon.
+if C_Engraving and C_Engraving.IsInventorySlotEngravable then
+	local oIsInventorySlotEngravable = C_Engraving.IsInventorySlotEngravable
+	C_Engraving.IsInventorySlotEngravable = function(containerIndex, slotIndex)
+		if containerIndex >= 0 then
+			return oIsInventorySlotEngravable(containerIndex, slotIndex) --bool
+		else
+			return false
+		end
+	end
+end
+
+
+---------------------------------------------------------------------------------------------------------------------------------------
+local MODULE_NAME = "Sku"
+-- WoW passes (addonName, privateNamespace) to every file of this addon; the
+-- second value is one table shared across all Sku files. Sku historically
+-- discarded it and put everything in _G. The Sku 42 rework (W4 Phase A) adopts
+-- it as the addon-private namespace `ns` for internal-only state/helpers, while
+-- the published API (Sku and the module tables) stays global. It is also exposed
+-- as Sku.ns so any module holding `Sku` can reach it without re-reading `...`.
+local ADDON_NAME, ns = ...
+ns = ns or {}
+
+Sku = {}
+Sku.ns = ns
+Sku.L = LibStub("AceLocale-3.0"):GetLocale("Sku", false)
+Sku.Loc = Sku.L["locale"]
+
+-- [v42.09 i18n] Sku.Locs is the ORDERED list of data locales. The order is
+-- load-bearing in exactly one place: the packed route-name strings in the
+-- routedata files are positional, "<enUS>§<deDE>" today and "<enUS>§<deDE>§<frFR>"
+-- once French name data exists (SkuNav:LoadDefaultMapData splits them against
+-- this list). Never reorder the first two entries; append new locales at the
+-- end. Data files with FEWER §-fields than this list stay valid - the split
+-- simply leaves the trailing locales empty, which is exactly the current
+-- two-field state of every shipped route file.
+Sku.Locs = {"enUS", "deDE", "frFR",}
+
+-- [v42.09 i18n] Audio locale, deliberately SEPARATE from Sku.Loc.
+--
+-- The pre-recorded clips under SkuAudioData/assets/audio/ exist for deDE and
+-- enUS only (~35 genuinely spoken tokens - the eight compass directions plus
+-- the movement/status states; everything else in that index is a
+-- locale-neutral sound-effect name). Those play on a dedicated low-latency
+-- channel, which is the whole point of pre-rendering them, so a locale without
+-- its own clips must fall back to the ENGLISH audio rather than to TTS.
+--
+-- Consequence for translators: the handful of L[] keys whose value is looked up
+-- in the integrated audio index must keep their ENGLISH value in every locale
+-- file that has no audio pack. See Sku.AudioLiteralKeys below - that list is
+-- the contract, do not "fix" those entries into French.
+Sku.LocAudio = (Sku.Loc == "deDE") and "deDE" or "enUS"
+
+-- NOTE for translators: there is deliberately no "do not translate" key list
+-- here. The integrated-audio lookups are driven by HARDCODED identifiers, not
+-- by L[] values - callers pass literals like "male-Drinnen", "male-Fallen",
+-- "male-Tot" straight to SkuVoice:OutputString / GetAudiodata (SkuCore/Core.lua
+-- 268, 1315, 1414, 1422, 1430). Those strings never pass through the locale
+-- table, so no translation can break them. The enUS index uses the same tokens
+-- lowercased ("male-drinnen"), which is why they are identifiers and not speech.
+-- Sku.LocAudio above is therefore the ONLY thing French needs here.
+
+-- [v42.09 i18n] Which data locales this client keeps RESIDENT.
+--
+-- Before this, ChunkLoader built every registered chunk regardless of the
+-- client language, so a German client also built the full enUS name tables and
+-- vice versa. The rule now is "active locale + enUS":
+--   * the active locale, because objectLookup/itemLookup/questLookup/NpcData
+--     are read as [Sku.Loc] at runtime in ~150 places;
+--   * enUS unconditionally, because it is the hard fallback that several live
+--     paths rely on (auctionHouse.lua itemLookup fallback, SkuDB.Wiki, and
+--     Sku.locStr's fallback chain), and because it is the pivot the /sku
+--     translate authoring pipeline translates FROM.
+-- An English client therefore stops paying for the German tables entirely.
+--
+-- ESCAPE HATCH: the /sku translate authoring pipeline needs deDE AND enUS
+-- resident at once no matter which client it runs on. SkuTranslatedData is
+-- already the authoring SavedVariable, so the flag lives there and is honoured
+-- at BUILD time (PLAYER_LOGIN), by which point SavedVariables have loaded.
+-- Toggle with /sku alllocales, then /reload.
+function Sku:LocaleIsWanted(aLoc)
+	if not aLoc then return true end
+	if SkuTranslatedData and SkuTranslatedData.loadAllLocales == true then return true end
+	return aLoc == Sku.Loc or aLoc == "enUS" or aLoc == Sku.LocAudio
+end
+
+-- [v42.08] frFR aufgenommen: der Minimap-/Boden-Ressourcenscanner hat jetzt native
+-- franzoesische Knotennamen (SkuCore/minimapScanner.lua), daher darf Sku.LocP auf einem
+-- frFR-Client "frFR" bleiben (statt auf enUS zurueckzufallen), damit die frFR-Namen greifen.
+Sku.LocsPartly = {["deDE"] = true, ["enUS"] = true, ["zhCN"] = true, ["ruRU"] = true, ["frFR"] = true,}
+Sku.LocP = GetLocale()
+if not Sku.LocsPartly[GetLocale()] then
+	Sku.LocP = "enUS"
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- [v42.12] The SlashFunc menu-root token - a PROTOCOL constant, never speech.
+--
+-- SkuOptions:SlashFunc(path) takes a comma-separated menu path whose FIRST
+-- field selects the handler; SkuZOptions/Core.lua compares it, ~25 sites build
+-- paths with it. It used to be read from L["short"], which put an internal
+-- string constant in the translation table next to real UI text - and the key
+-- is shared with a genuinely user-facing label (the "long"/"short" monitoring
+-- output style in SkuCore/aq.lua), so a translator seeing "short" quite
+-- reasonably translates the visible meaning.
+--
+-- That is exactly what happened on frFR (L["short"] = "court", PR #2): six
+-- sites hardcode the literal "short," rather than the locale key, so
+-- ToggleQuestLogHook built "short,Local,Quete" while the comparison checked
+-- "court". No match, no error - the Quest Log key L was silently dead.
+--
+-- Splitting the two meanings removes the class of bug: this constant is what
+-- the code speaks to itself, L["short"] stays free to be real translatable
+-- text. The comparison still ACCEPTS the localized form as well, so a user who
+-- learned to type the translated path keeps working.
+Sku.MENU_ROOT = "short"
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- W5: Sprachpaket-Erkennung. Statt fest verdrahteter Ordnernamen je Locale werden
+-- die installierten SkuAudioData*-Addons aufgezählt und das zur Client-Sprache
+-- passende gewählt. Neue Pakete deklarieren sich per TOC-Metadaten
+-- (## X-SkuVoicePack-Locale, optional ## X-SkuVoicePack-ExtraSpeed) und brauchen
+-- dann keinen eigenen Glue-Code mehr; Alt-Pakete mit eigenem Core.lua laden nach
+-- Sku und überschreiben Sku.AudiodataPath weiterhin selbst (gewinnt wie bisher).
+-- Muss beim Laden von Sku laufen (TOC-Metadaten sind auch für noch nicht geladene
+-- Addons lesbar), damit Ladezeit-Verbraucher schon den richtigen Pfad sehen.
+Sku.AudiodataPath = ""
+Sku.AudiodataPathInfo = "" -- always set by the do-block below (pack found or not-found message)
+do
+	local tGetNum = (C_AddOns and C_AddOns.GetNumAddOns) or GetNumAddOns
+	local tGetInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
+	local tGetMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+	local tLegacyPackLocales = {["SkuAudioData"] = "deDE", ["SkuAudioData_en"] = "enUS",}
+	local tSuffixLocales = {["de"] = "deDE", ["en"] = "enUS",}
+	-- [i18n] Sku.LocAudio, not Sku.Loc -- same reason as Sku:IntegratedAudioDir()
+	-- below: there are no French clips, and there is no frFR voice pack either.
+	-- Since v42.11 ships a frFR locale, Sku.Loc == "frFR" on a French client, so
+	-- this loop asked for a pack that cannot exist and matched nothing: no
+	-- installed pack declares frFR (SkuAudioData_en declares enUS via
+	-- tLegacyPackLocales). Sku.AudiodataPath then stayed "", VoicePackAudioDir()
+	-- returned nil, and everything the pack serves went silent -- including the
+	-- 64 aura sound outputs, whose clips exist ONLY in the pack
+	-- (SkuAudioFileIndexIntegrated holds speech tokens, not sound effects), so
+	-- they have no TTS fallback to degrade to. Sku.LocAudio is already "enUS" on
+	-- every non-deDE client, so deDE and enUS behaviour is unchanged.
+	local tWantedLoc = Sku.LocAudio or Sku.Loc
+	if tWantedLoc == "enGB" or tWantedLoc == "enAU" then tWantedLoc = "enUS" end
+	local tBest, tBestScore, tBestHow = nil, 0, nil
+	for i = 1, tGetNum() do
+		local tName, _, _, tLoadable = tGetInfo(i)
+		if tName and tLoadable and string.find(tName, "^SkuAudioData") then
+			local tLoc = tGetMeta(tName, "X-SkuVoicePack-Locale")
+			local tScore, tHow = 3, "metadata"
+			if not tLoc then
+				tLoc, tScore, tHow = tLegacyPackLocales[tName], 2, "legacy name"
+			end
+			if not tLoc then
+				tLoc, tScore, tHow = tSuffixLocales[string.match(tName, "_(%a+)$") or ""], 1, "name suffix"
+			end
+			if tLoc == tWantedLoc and tScore > tBestScore then
+				tBest, tBestScore, tBestHow = tName, tScore, tHow
+			end
+		end
+	end
+	if tBest then
+		Sku.AudiodataPath = tBest
+		Sku.AudiodataPathInfo = tBest.." ("..tBestHow..")"
+		local tExtraSpeed = tonumber(tGetMeta(tBest, "X-SkuVoicePack-ExtraSpeed") or "")
+		if tExtraSpeed then
+			Sku.AudiodataExtraSpeed = tExtraSpeed
+		end
+	else
+		-- The searched locale is tWantedLoc (Sku.LocAudio-based), not Sku.Loc: on a
+		-- frFR client the old message blamed "frFR" -- a pack nobody ships -- when
+		-- the search actually ran (and failed) for enUS. Reported by Naxedim (PR #5).
+		Sku.AudiodataPathInfo = "no voice pack found for "..tostring(tWantedLoc).." (client locale "..tostring(Sku.Loc)..")"
+	end
+end
+
+-- W5: zentraler Audio-Pfad-Resolver — die einzigen Stellen, die Sprachdatei-Pfade
+-- zusammensetzen. Liest Sku.AudiodataPath bei jedem Aufruf, damit ein späterer
+-- Override durch Alt-Paket-Glue weiterhin greift. Reine Pfad-Auflösung: Kanäle,
+-- Queues und Sound-Handles bleiben Sache der Aufrufer.
+function Sku:VoicePackAudioDir()
+	if Sku.AudiodataPath == "" then return nil end
+	return [[Interface\AddOns\]]..Sku.AudiodataPath..[[\assets\audio\]]
+end
+
+function Sku:IntegratedAudioDir()
+	-- [v42.09 i18n] Sku.LocAudio, not Sku.Loc: clips exist for deDE and enUS
+	-- only, so any other client language reads the English folder.
+	return [[Interface\AddOns\Sku\SkuAudioData\assets\audio\]]..Sku.LocAudio..[[\]]
+end
+
+function Sku:AudioFile(aFileName)
+	local tDir = Sku:VoicePackAudioDir()
+	if not tDir or not aFileName then return nil end
+	return tDir..aFileName
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+Sku.testMode = false
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- tmp fixes for 11404 ptr
+Sku.toc = select(4, GetBuildInfo())
+-- WoW Forever ("Camelot", Blizzard's own new Classic client): Interface 16xxx.
+Sku.isForever = (Sku.toc >= 16000 and Sku.toc < 17000)
+if Sku.toc >= 20505 then
+	Sku.isTBC = true
+end
+
+-- Classic Era (1.15.x) detection — the central flag for the unified Era/TBC build.
+-- Era's interface is 11xxx and WOW_PROJECT_ID == WOW_PROJECT_CLASSIC; TBC Anniversary
+-- is 20xxx / WOW_PROJECT_BURNING_CRUSADE_CLASSIC. Use the project constant as the
+-- primary signal with a numeric fallback so gating is correct even if the constant
+-- is ever absent. Gate any TBC-content-only feature (e.g. gem socketing) on this.
+Sku.isEra = ((WOW_PROJECT_ID ~= nil and WOW_PROJECT_ID == WOW_PROJECT_CLASSIC) or (Sku.toc > 0 and Sku.toc < 20000)) and true or false
+
+if Sku.toc > 11403 then
+	PickupContainerItem = C_Container.PickupContainerItem
+	GetContainerNumSlots = C_Container.GetContainerNumSlots
+	GetContainerNumFreeSlots = C_Container.GetContainerNumFreeSlots
+	UseContainerItem = C_Container.UseContainerItem
+	GetContainerItemID = C_Container.GetContainerItemID
+	GetItemCooldown = C_Container.GetItemCooldown
+	GetContainerItemQuestInfo = function(bag, slot)
+		local t = C_Container.GetContainerItemQuestInfo(bag, slot)
+		return t.isQuestItem
+	end
+	GetContainerItemInfo = function(bag, slot)
+		slot = slot or 0
+		local t = C_Container.GetContainerItemInfo(bag, slot)
+		if not t then
+			return
+		end		
+		return t.iconFileID, t.stackCount, t.isLocked, t.quality, t.isReadable, t.hasLoot, t.hyperlink, t.isFiltered, t.hasNoValue, t.itemID, t.isBound
+	end
+	SocketContainerItem = C_Container.SocketContainerItem
+	SplitContainerItem = C_Container.SplitContainerItem
+	GetContainerItemLink = C_Container.GetContainerItemLink
+	GetContainerItemCooldown = C_Container.GetContainerItemCooldown
+
+	SetTracking = C_Minimap.SetTracking
+	GetTrackingInfo = C_Minimap.GetTrackingInfo
+	GetNumTrackingTypes = C_Minimap.GetNumTrackingTypes
+end
+
+-- WoW Forever/Camelot: old global item helpers now live in C_Item. Alias every one
+-- that is missing so the hundreds of call sites keep working unchanged.
+if _G.C_Item then
+	for _, tName in ipairs({"IsEquippableItem", "GetItemInfoInstant", "GetItemCount", "GetItemQualityColor",
+		"GetItemIcon", "IsConsumableItem", "IsUsableItem", "GetDetailedItemLevelInfo", "IsItemInRange",
+		"GetItemSpell", "GetItemFamily", "GetItemInventoryTypeByID", "IsUsableItem", "IsCurrentItem"}) do
+		if not _G[tName] and type(_G.C_Item[tName]) == "function" then
+			_G[tName] = _G.C_Item[tName]
+		end
+	end
+end
+
+-- WoW Forever/Camelot: legacy helpers the overview page (Ctrl-Shift-Down: buffs, skills,
+-- reputation, guild, loot) still calls. Each is rebuilt only when missing.
+if not _G.UnitBuff then
+	_G.UnitBuff = function(aUnit, aIndex, aFilter)
+		return UnitAura(aUnit, aIndex, "HELPFUL" .. (aFilter and ("|" .. aFilter) or ""))
+	end
+end
+if not _G.UnitDebuff then
+	_G.UnitDebuff = function(aUnit, aIndex, aFilter)
+		return UnitAura(aUnit, aIndex, "HARMFUL" .. (aFilter and ("|" .. aFilter) or ""))
+	end
+end
+if not _G.GetSpellCooldown and _G.C_Spell and _G.C_Spell.GetSpellCooldown then
+	-- old: start, duration, enabled, modRate
+	_G.GetSpellCooldown = function(aSpell)
+		local t = C_Spell.GetSpellCooldown(aSpell)
+		if not t then return 0, 0, 1, 1 end
+		return t.startTime, t.duration, (t.isEnabled == false) and 0 or 1, t.modRate
+	end
+end
+if not _G.GetLootMethod and _G.C_PartyInfo and _G.C_PartyInfo.GetLootMethod then
+	-- old: "freeforall" / "roundrobin" / "master" / "group" / "needbeforegreed" / "personalloot"
+	_G.GetLootMethod = function()
+		local tOk, tMethod = pcall(C_PartyInfo.GetLootMethod)
+		local tNames = { [0] = "freeforall", [1] = "roundrobin", [2] = "master", [3] = "group", [4] = "needbeforegreed", [5] = "personalloot" }
+		return tOk and tNames[tMethod] or "personalloot"
+	end
+end
+if not _G.GuildRoster then
+	_G.GuildRoster = (_G.C_GuildInfo and _G.C_GuildInfo.GuildRoster) or function() end
+end
+if not _G.SetGuildRosterShowOffline then
+	_G.SetGuildRosterShowOffline = function() end
+end
+if not _G.GetInventoryAlertStatus then
+	_G.GetInventoryAlertStatus = function() return 0 end
+end
+if not _G.GetNumSkillLines then
+	_G.SkuShimSkillLines = true
+	_G.GetNumSkillLines = function() return 0 end
+	_G.GetSkillLineInfo = function() return nil end
+end
+if _G.C_Reputation then
+	if not _G.GetNumFactions and C_Reputation.GetNumFactions then
+		_G.GetNumFactions = C_Reputation.GetNumFactions
+	end
+	if not _G.ExpandAllFactionHeaders and C_Reputation.ExpandAllFactionHeaders then
+		_G.ExpandAllFactionHeaders = C_Reputation.ExpandAllFactionHeaders
+	end
+	if not _G.GetFactionInfo and C_Reputation.GetFactionDataByIndex then
+		-- old: name, description, standingID, bottomValue, topValue, earnedValue, atWarWith,
+		-- canToggleAtWar, isHeader, isCollapsed, hasRep, isWatched, isChild, factionID
+		_G.GetFactionInfo = function(aIndex)
+			local t = C_Reputation.GetFactionDataByIndex(aIndex)
+			if not t then return nil end
+			return t.name, t.description, t.reaction, t.currentReactionThreshold, t.nextReactionThreshold,
+				t.currentStanding, t.atWarWith, t.canToggleAtWar, t.isHeader, t.isCollapsed,
+				t.isHeaderWithRep, t.isWatched, t.isChild, t.factionID
+		end
+	end
+end
+
+-- WoW Forever/Camelot: BetterDate (a thin wrapper over date()) is gone. The chat line
+-- reader and the timestamp setting call it, so a missing global broke reading chat back.
+if not _G.BetterDate then
+	_G.BetterDate = function(aFormat, aTime)
+		local tOk, tRes = pcall(date, aFormat or "%H:%M:%S ", aTime or time())
+		return tOk and tRes or ""
+	end
+end
+
+-- WoW Forever/Camelot: GetCoinText moved to C_CurrencyInfo; fall back to a plain
+-- gold/silver/copper string if neither exists.
+if not _G.GetCoinText then
+	_G.GetCoinText = function(aCopper, aSep)
+		if _G.C_CurrencyInfo and _G.C_CurrencyInfo.GetCoinText then
+			local tOk, tText = pcall(_G.C_CurrencyInfo.GetCoinText, aCopper, aSep)
+			if tOk and type(tText) == "string" then return tText end
+		end
+		aCopper = math.floor(tonumber(aCopper) or 0)
+		local tParts = {}
+		local g, s, c = math.floor(aCopper / 10000), math.floor((aCopper % 10000) / 100), aCopper % 100
+		if g > 0 then tParts[#tParts + 1] = g .. " Gold" end
+		if s > 0 then tParts[#tParts + 1] = s .. " Silber" end
+		if c > 0 or #tParts == 0 then tParts[#tParts + 1] = c .. " Kupfer" end
+		return table.concat(tParts, aSep or " ")
+	end
+end
+
+-- WoW Forever/Camelot removes the global GetSpellInfo/GetSpellBookItemName in
+-- favour of C_Spell/C_SpellBook, whose returns are shaped differently (a
+-- table instead of positional values; a spellBank Enum instead of the old
+-- BOOKTYPE_* strings). Rather than touch every call site across Sku, these
+-- globals are reconstructed here in the old shape, guarded so a client that
+-- still has the old globals is untouched.
+-- UnitAura itself is missing on some clients (WoW Forever/Camelot) -- elsewhere
+-- Blizzard ships it as a compatibility shim over C_UnitAuras.GetAuraDataByIndex
+-- (see the comment in SkuAuras/Core.lua), but not here. Old positional shape:
+-- name, icon, count, dispelType, duration, expirationTime, caster, isStealable,
+-- nameplateShowPersonal, spellId, canApplyAura, isBossAura, castByPlayer,
+-- nameplateShowAll, timeMod.
+if not UnitAura and C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+	UnitAura = function(aUnit, aIndex, aFilter)
+		local t = C_UnitAuras.GetAuraDataByIndex(aUnit, aIndex, aFilter)
+		if not t then return nil end
+		return t.name, t.icon, t.applications, t.dispelName, t.duration, t.expirationTime, t.sourceUnit, t.isStealable, t.nameplateShowPersonal, t.spellId, t.canApplyAura, t.isBossAura, t.isFromPlayerOrPlayerPet, t.nameplateShowAll, t.timeMod
+	end
+end
+
+if not GetSpellInfo and C_Spell and C_Spell.GetSpellInfo then
+	-- Old shape: name, rank, icon, castTime, minRange, maxRange, spellId.
+	-- "rank" has had no data since ranks were removed from retail (already
+	-- nil there); the modern SpellInfo table has no rank field either way.
+	GetSpellInfo = function(aSpell)
+		local t = C_Spell.GetSpellInfo(aSpell)
+		if not t then return nil end
+		return t.name, nil, t.iconID, t.castTime, t.minRange, t.maxRange, t.spellID
+	end
+end
+
+-- Same story for the quest log: GetNumQuestLogEntries/GetQuestLogTitle move to
+-- C_QuestLog on some clients (WoW Forever/Camelot). GetNumQuestLogEntries is a
+-- straight rename (same two return values); GetQuestLogTitle's replacement
+-- returns a table instead of positional values, and drops isComplete/
+-- displayQuestID, so isComplete is recovered with a second call and
+-- displayQuestID comes back nil (no Sku call site we found reads it).
+if not GetNumQuestLogEntries and C_QuestLog and C_QuestLog.GetNumQuestLogEntries then
+	GetNumQuestLogEntries = C_QuestLog.GetNumQuestLogEntries
+end
+if not GetQuestLogTitle and C_QuestLog and C_QuestLog.GetInfo then
+	GetQuestLogTitle = function(aIndex)
+		local t = C_QuestLog.GetInfo(aIndex)
+		if not t then return nil end
+		local tIsComplete = nil
+		if t.questID and C_QuestLog.IsComplete then
+			local tOk, tRes = pcall(C_QuestLog.IsComplete, t.questID)
+			if tOk then tIsComplete = tRes end
+		end
+		return t.title, t.level, t.suggestedGroup, t.isHeader, t.isCollapsed, tIsComplete, t.frequency, t.questID, t.startEvent, nil, t.isOnMap, t.hasLocalPOI, t.isTask, t.isStory
+	end
+end
+
+-- QuestLogFrame is a standalone window on old clients; on this one the quest
+-- log lives inside the world map (QuestMapFrame) instead, and the old global
+-- doesn't exist at all. Aliased here so the many unguarded QuestLogFrame:
+-- IsVisible()/ShowUIPanel(QuestLogFrame)/HideUIPanel(QuestLogFrame) call
+-- sites across SkuQuest/SkuZOptions/SkuCore keep working without touching
+-- each one individually. QuestMapFrame is a real Frame (IsVisible works);
+-- ShowUIPanel/HideUIPanel may or may not manage it the exact old way, but
+-- that is strictly better than the hard crash this replaces.
+if not _G.QuestLogFrame and _G.QuestMapFrame then
+	_G.QuestLogFrame = _G.QuestMapFrame
+end
+
+-- WoW Forever/Camelot: cursor/pickup helpers moved into C_* namespaces. Alias whichever
+-- are missing so the action bar assignment code keeps working unchanged.
+for _, tPair in ipairs({
+	{"PickupSpell", "C_Spell"}, {"PickupSpellBookItem", "C_SpellBook"}, {"PickupItem", "C_Item"},
+	{"PickupMacro", "C_Macro"}, {"PickupAction", "C_ActionBar"}, {"PlaceAction", "C_ActionBar"},
+	{"PickupPetAction", "C_ActionBar"}, {"PickupPetSpell", "C_SpellBook"},
+	{"PickupCompanion", "C_MountJournal"}, {"GetMacroSpell", "C_Macro"},
+}) do
+	local tNs = _G[tPair[2]]
+	if not _G[tPair[1]] and type(tNs) == "table" and type(tNs[tPair[1]]) == "function" then
+		_G[tPair[1]] = tNs[tPair[1]]
+	end
+end
+if not _G.CursorHasSpell then
+	_G.CursorHasSpell = function() return (GetCursorInfo()) == "spell" end
+end
+
+-- WoW Forever/Camelot no longer defines the spellbook type constants. Without them the
+-- action bar menus passed nil and skipped the spellbook list entirely.
+if _G.BOOKTYPE_SPELL == nil then _G.BOOKTYPE_SPELL = "spell" end
+if _G.BOOKTYPE_PET == nil then _G.BOOKTYPE_PET = "pet" end
+
+if not GetSpellBookItemName and C_SpellBook and C_SpellBook.GetSpellBookItemName and Enum and Enum.SpellBookSpellBank then
+	-- Old shape: name, subName, spellID (3rd value not offered by the
+	-- replacement here, so it comes back nil - no Sku call site we found
+	-- reads it). BOOKTYPE_PET's real value selects the pet bank; anything
+	-- else (including a caller accidentally passing the identifier text
+	-- "BOOKTYPE_SPELL" instead of its value, as one Sku call site does)
+	-- falls back to the player bank, matching the old API's tolerant default.
+	GetSpellBookItemName = function(aIndex, aBookType)
+		local tBank = (aBookType == BOOKTYPE_PET) and Enum.SpellBookSpellBank.Pet or Enum.SpellBookSpellBank.Player
+		local tName, tSubName = C_SpellBook.GetSpellBookItemName(aIndex, tBank)
+		return tName, tSubName, nil
+	end
+end
+
+-- Spellbook tab/item helpers (WoW Forever/Camelot): rebuilt in the old positional shape
+-- on top of C_SpellBook / C_Spell, each guarded so an old client is untouched.
+if C_SpellBook then
+	local function tBank(aBookType)
+		if Enum and Enum.SpellBookSpellBank then
+			return (aBookType == BOOKTYPE_PET or aBookType == "pet") and Enum.SpellBookSpellBank.Pet or Enum.SpellBookSpellBank.Player
+		end
+		return aBookType
+	end
+	if not GetNumSpellTabs and C_SpellBook.GetNumSpellBookSkillLines then
+		GetNumSpellTabs = C_SpellBook.GetNumSpellBookSkillLines
+	end
+	if not GetSpellTabInfo and C_SpellBook.GetSpellBookSkillLineInfo then
+		-- old: name, texture, offset, numEntries, isGuild, offspecID
+		GetSpellTabInfo = function(aIndex)
+			local t = C_SpellBook.GetSpellBookSkillLineInfo(aIndex)
+			if not t then return nil end
+			return t.name, t.iconID, t.itemIndexOffset, t.numSpellBookItems, t.isGuild, t.offSpecID
+		end
+	end
+	if not GetSpellBookItemInfo and C_SpellBook.GetSpellBookItemInfo then
+		-- old: typeString, id  (id = spellID)
+		GetSpellBookItemInfo = function(aIndex, aBookType)
+			local t = C_SpellBook.GetSpellBookItemInfo(aIndex, tBank(aBookType))
+			if not t then return nil end
+			local tType = "SPELL"
+			if Enum and Enum.SpellBookItemType then
+				if t.itemType == Enum.SpellBookItemType.Flyout then tType = "FLYOUT"
+				elseif t.itemType == Enum.SpellBookItemType.FutureSpell then tType = "FUTURESPELL" end
+			end
+			return tType, t.spellID or t.actionID
+		end
+	end
+	if not IsPassiveSpell then
+		IsPassiveSpell = function(aSpellId, aBookType)
+			if not aSpellId then return false end
+			if C_Spell and C_Spell.IsSpellPassive then
+				local tOk, tRes = pcall(C_Spell.IsSpellPassive, aSpellId)
+				if tOk then return tRes and true or false end
+			end
+			if C_SpellBook.IsSpellPassive then
+				local tOk, tRes = pcall(C_SpellBook.IsSpellPassive, aSpellId)
+				if tOk then return tRes and true or false end
+			end
+			return false
+		end
+	end
+	if not IsSpellKnown and C_SpellBook.IsSpellKnown then
+		IsSpellKnown = function(aSpellId, aIsPet)
+			if not aSpellId then return false end
+			local tOk, tRes = pcall(C_SpellBook.IsSpellKnown, aSpellId, aIsPet and Enum.SpellBookSpellBank.Pet or Enum.SpellBookSpellBank.Player)
+			return tOk and tRes and true or false
+		end
+	end
+	if not HasPetSpells and C_SpellBook.HasPetSpells then
+		HasPetSpells = C_SpellBook.HasPetSpells
+	end
+end
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Sku.IsEraSoD = false
+if C_Engraving and C_Engraving.IsEngravingEnabled and C_Engraving.IsEngravingEnabled() == true then
+	Sku.IsEraSoD = true
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+Sku.metric = {}
+debugprofilestart()
+function Sku:MetricPoint(aText)
+	Sku.metric[#Sku.metric + 1] = {aText, debugprofilestop()/1000}
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- General debug logging (dprint).
+-- Two independent switches live under Sku.debug:
+--   Sku.debug.print -> echo to the chat frame (the original dprint behaviour;
+--                      a sighted developer reads the trace live in game).
+--   Sku.debug.log   -> append to a persisted ring buffer in the SkuDebugLog
+--                      SavedVariable, readable out-of-game after a /reload
+--                      (no chat output -> no TTS spam).
+-- Either, both, or neither may be on. With both off, dprint returns after a
+-- single table+flag check and does NO further work, so the 400+ existing
+-- dprint call sites stay free in normal play. Unlike SkuErrorLog:Log, this
+-- path never calls debugstack and never builds per-event context, so it is
+-- cheap even while enabled. Toggle via the SKU_KEY_DEBUGMODE keybind (cycles
+-- the modes) or /skudebug for precise control.
+-- Sku 42 default: log ON (capture breadcrumbs to the SkuDebugLog ring every
+-- session, so traces are available after a /reload without re-enabling), print
+-- OFF (no chat echo / no TTS spam). Override per session via /skudebug.
+-- Sku.debug.verbose gates a THIRD, opt-in channel (dprintv) for high-frequency
+-- breadcrumbs that are useful only while chasing one specific bug and otherwise
+-- flood the ring -- e.g. one line per PLAYER_STARTED_MOVING. Those used to eat
+-- ~50% of the buffer, which cut a capture down to a few minutes of history.
+-- Default OFF, so the ring now holds mostly signal.
+Sku.debug = { print = false, log = true, verbose = false }
+
+-- Cap on persisted lines (ring buffer).
+--
+-- Sizing note (weak PCs are the target): an entry is stored as ONE plain string
+-- ("seq|hh:mm:ss|msg", see tDebugLogAppend) instead of the old 3-field table.
+-- A Lua table with three hash slots costs roughly 200-250 bytes of overhead per
+-- line; a string costs ~24 bytes plus its characters. In the SavedVariables file
+-- the old form wrote five lines per entry (~120 bytes of syntax), the new one
+-- writes a single quoted line (~25 bytes). So the compact form is about 4-5x
+-- cheaper in memory, in file size, and -- the part that matters on a slow
+-- machine -- in the Lua parse WoW does for Sku.lua at every login.
+-- 12000 compact lines land near 1 MB of RAM and ~1 MB of file, i.e. roughly 2-3x
+-- the cost of the old 2000-line table ring while holding 6x the history (~45-60
+-- minutes of normal play once the verbose channel is off, against ~4 minutes
+-- before). Raise it per session with "/skudebug size <n>" for a long capture; the
+-- value persists in SkuDebugLog.max.
+local DEBUGLOG_MAX_DEFAULT = 12000
+local DEBUGLOG_MAX_LIMIT = 40000
+local DEBUGLOG_TRIM_SLACK = 1024   -- amortise the O(n) rebuild over this many overflows
+local DEBUGLOG_FORMAT = 2          -- 1 = {seq=,t=,msg=} tables, 2 = "seq|t|msg" strings
+
+-- Render one dprint argument into a readable string. Tables are shallow-
+-- serialised one level deep (k=v, ...) so the log stays informative without
+-- the cost/size of a deep walk; nested tables collapse to "{...}".
+local function tDebugArg(aVal)
+	if type(aVal) ~= "table" then
+		return tostring(aVal)
+	end
+	local tParts, tN = {}, 0
+	for k, v in pairs(aVal) do
+		tN = tN + 1
+		if tN > 30 then
+			tParts[#tParts + 1] = "..."
+			break
+		end
+		local tv = type(v)
+		if tv == "table" then
+			v = "{...}"
+		elseif tv == "string" then
+			v = (#v > 120) and (v:sub(1, 120) .. "…") or v
+		else
+			v = tostring(v)
+		end
+		tParts[#tParts + 1] = tostring(k) .. "=" .. v
+	end
+	return "{" .. table.concat(tParts, ", ") .. "}"
+end
+
+-- Current ring cap: the persisted override if sane, else the default.
+local function tDebugLogMax()
+	local tMax = (type(SkuDebugLog) == "table") and tonumber(SkuDebugLog.max) or nil
+	if not tMax then return DEBUGLOG_MAX_DEFAULT end
+	if tMax < 500 then return 500 end
+	if tMax > DEBUGLOG_MAX_LIMIT then return DEBUGLOG_MAX_LIMIT end
+	return math.floor(tMax)
+end
+
+local function tDebugLogAppend(...)
+	if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+	local tLog = SkuDebugLog
+	-- A ring written by an older Sku holds tables, not strings. Mixing the two
+	-- would break every reader, and that history is from a previous build anyway,
+	-- so convert by dropping it once and stamping the format.
+	if tLog.format ~= DEBUGLOG_FORMAT then
+		tLog.format = DEBUGLOG_FORMAT
+		tLog.lines = {}
+	end
+	tLog.lines = tLog.lines or {}
+	tLog.seq   = (tLog.seq or 0) + 1
+	local tN = select("#", ...)
+	local tParts = {}
+	for i = 1, tN do
+		tParts[i] = tDebugArg((select(i, ...)))
+	end
+	-- Compact single-string entry: "seq|hh:mm:ss|msg". Cheaper to allocate, to
+	-- serialise and to parse back than the former per-line table (see the sizing
+	-- note at DEBUGLOG_MAX_DEFAULT). Readers split on the first two "|".
+	local tLines = tLog.lines
+	tLines[#tLines + 1] = tLog.seq .. "|" .. date("%H:%M:%S") .. "|" .. table.concat(tParts, "  ")
+	-- Amortised trim: rebuild keeping the newest tDebugLogMax() only every
+	-- DEBUGLOG_TRIM_SLACK overflows, so a chatty scan loop never pays an O(n)
+	-- table.remove per line.
+	local tMax = tDebugLogMax()
+	if #tLines > tMax + DEBUGLOG_TRIM_SLACK then
+		local tKeep, tStart = {}, #tLines - tMax + 1
+		for i = tStart, #tLines do
+			tKeep[#tKeep + 1] = tLines[i]
+		end
+		tLog.lines = tKeep
+	end
+end
+
+function dprint(...)
+	local d = Sku.debug
+	if not d or (not d.print and not d.log) then return end
+	if d.print then
+		print(...)
+	end
+	if d.log then
+		tDebugLogAppend(...)
+	end
+end
+
+-- Verbose dprint: same output, but additionally gated behind Sku.debug.verbose.
+-- Use it for per-frame / per-event breadcrumbs that would otherwise dominate the
+-- ring; enable with "/skudebug verbose on" while chasing that specific area.
+function dprintv(...)
+	local d = Sku.debug
+	if not d or not d.verbose then return end
+	dprint(...)
+end
+
+-- [SOUND-PROBE] removed (v42.12). It was marked TEMPORARY and it was NOT free
+-- when logging was off: dprint tests Sku.debug inside itself, so every argument
+-- -- including debugstack(2, 2, 0) -- was evaluated by the caller first. The hook
+-- sat on the GLOBAL PlaySound, so every Blizzard call paid a debugstack too (a
+-- single UI action fires five or more). Re-add it temporarily and locally if the
+-- menu swoosh ever needs tracing again.
+
+-- Write a one-off marker line into the ring with full date+time. Called when
+-- logging is turned on, so a persisted-but-uncleared buffer shows an
+-- unmistakable "this run starts here" divider — the ring is NOT cleared on
+-- /reload and the flags reset to off each load, so without this stale lines
+-- from an earlier session can be mistaken for fresh output.
+function Sku:DebugLogMark(aText)
+	tDebugLogAppend("=== " .. tostring(aText) .. "  " .. date("%Y-%m-%d %H:%M:%S") .. " ===")
+end
+
+-- Always-on combat-trace ring (independent of the Sku.debug flags), living in
+-- SkuDebugLog.combatTrace. SkuDebugLog.blockProbe only catches taint BLOCKS
+-- (ADDON_ACTION_BLOCKED/FORBIDDEN); but Sku's combat problem is mostly SELF-
+-- deactivation -- code that voluntarily bails/defers because of combat and never
+-- reaches a protected call, so nothing is ever blocked to capture. This ring
+-- records those decision points (tag + detail + live combat flag) so a single
+-- test cycle shows exactly where Sku turns itself off in combat, and -- once the
+-- restriction is relaxed -- that the read path now runs. Ring of 300; read it
+-- from SkuDebugLog.combatTrace after a /reload.
+function SkuLogCombat(aTag, aDetail)
+	if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+	local tRing = SkuDebugLog.combatTrace or {}
+	SkuDebugLog.combatTrace = tRing
+	tRing[#tRing + 1] = {
+		t = date("%H:%M:%S"),
+		tag = tostring(aTag),
+		detail = (aDetail ~= nil) and tostring(aDetail) or "",
+		combat = (InCombatLockdown and InCombatLockdown()) and 1 or 0,
+	}
+	while #tRing > 300 do table.remove(tRing, 1) end
+end
+
+-- /skudebug — control the two debug channels and the persisted log.
+SLASH_SKUDEBUG1 = "/skudebug"
+SlashCmdList["SKUDEBUG"] = function(aMsg)
+	aMsg = (aMsg or ""):lower():match("^%s*(.-)%s*$")
+	local d = Sku.debug or {}
+	Sku.debug = d
+	local tWasLog = d.log
+	if aMsg == "print on" then d.print = true
+	elseif aMsg == "print off" then d.print = false
+	elseif aMsg == "log on" then d.log = true
+	elseif aMsg == "log off" then d.log = false
+	elseif aMsg == "on" then d.print, d.log = true, true
+	elseif aMsg == "off" then d.print, d.log = false, false
+	elseif aMsg == "verbose on" then d.verbose = true
+	elseif aMsg == "verbose off" then d.verbose = false
+	elseif aMsg:match("^size%s+%d+$") then
+		if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+		local tWant = tonumber(aMsg:match("(%d+)"))
+		SkuDebugLog.max = math.max(500, math.min(DEBUGLOG_MAX_LIMIT, tWant))
+		print(string.format("|cff80c0ffSkuDebug|r: ring size = %d lines (persisted).", SkuDebugLog.max))
+		return
+	elseif aMsg:match("^locale") then
+		-- [v42.09 i18n] DEBUG data-locale override, for testing the SkuDB locale
+		-- gate without installing another game client. Persisted and applied at
+		-- PLAYER_LOGIN, before the chunk build reads it.
+		--
+		-- SCOPE - this moves the DATA locale only:
+		--   * Sku.Loc and Sku.LocAudio, so every [Sku.Loc] table lookup and the
+		--     chunk gate follow the override. That is the part worth testing.
+		--   * AceLocale is bound to the real GetLocale(), so UI STRINGS stay in
+		--     the client's language. A German client set to enUS speaks German
+		--     text over English data. That mismatch is expected, not a bug.
+		--   * File-scope `Sku.Loc == "deDE"` checks (SkuAuras/defaultAuras.lua,
+		--     SkuCore/data.lua) have already run by then and are unaffected.
+		-- Not a shipping feature - a bench tool for the DB layer.
+		local tArg = aMsg:match("^locale%s+(%S+)$")
+		if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+		if tArg == "off" or tArg == "none" then
+			SkuDebugLog.localeOverride = nil
+			print("|cff80c0ffSkuDebug|r: locale override cleared - /reload to apply.")
+		elseif tArg then
+			local tCanon
+			for i = 1, #Sku.Locs do
+				if string.lower(Sku.Locs[i]) == tArg then tCanon = Sku.Locs[i] end
+			end
+			if not tCanon then
+				print("|cff80c0ffSkuDebug|r: unknown locale '"..tArg.."'. Known: "
+					..table.concat(Sku.Locs, ", ").." (or off)")
+				return
+			end
+			SkuDebugLog.localeOverride = tCanon
+			print("|cff80c0ffSkuDebug|r: data locale forced to "..tCanon
+				.." - /reload to apply. UI text stays "..tostring(Sku.Loc)..".")
+		else
+			print("|cff80c0ffSkuDebug|r: locale override = "
+				..tostring(SkuDebugLog.localeOverride or "off")
+				.."; active data locale = "..tostring(Sku.Loc)
+				..". Usage: /skudebug locale <"..table.concat(Sku.Locs, "|").."|off>")
+		end
+		return
+	elseif aMsg == "dumpmapnames" then
+		-- [v42.09 i18n] Capture the CLIENT's own localized zone / map names so the
+		-- OFFLINE route-name generator can use them. The runtime C_Map fill in
+		-- ChunkLoader solves display, but the third §-field of the route names is
+		-- built by a Python script that cannot call the game API - it needs this
+		-- data as a file.
+		--
+		-- Deliberately keyed on GetLocale(), NOT Sku.Loc: the point is to record
+		-- what the real client speaks, so this must be run on a genuine client of
+		-- that language. Running it under /skudebug locale would just record the
+		-- host client's language under the wrong name.
+		if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+		local tOut = {locale = GetLocale(), areas = {}, maps = {}}
+		local tGetArea = C_Map and C_Map.GetAreaInfo
+		local tGetMap = C_Map and C_Map.GetMapInfo
+		local tA, tM = 0, 0
+		if SkuDB and type(SkuDB.InternalAreaTable) == "table" and tGetArea then
+			for tId in pairs(SkuDB.InternalAreaTable) do
+				if type(tId) == "number" then
+					local tOk, tRes = pcall(tGetArea, tId)
+					if tOk and type(tRes) == "string" and tRes ~= "" then
+						tOut.areas[tId] = tRes
+						tA = tA + 1
+					end
+				end
+			end
+		end
+		if SkuDB and type(SkuDB.ExternalMapID) == "table" and tGetMap then
+			for tId in pairs(SkuDB.ExternalMapID) do
+				if type(tId) == "number" then
+					local tOk, tRes = pcall(tGetMap, tId)
+					if tOk and type(tRes) == "table" and type(tRes.name) == "string" and tRes.name ~= "" then
+						tOut.maps[tId] = tRes.name
+						tM = tM + 1
+					end
+				end
+			end
+		end
+		SkuDebugLog.mapNameDump = tOut
+		print(string.format("|cff80c0ffSkuDebug|r: map-name dump for %s - %d areas, %d maps. /reload to persist.",
+			tostring(tOut.locale), tA, tM))
+		return
+	elseif aMsg == "dumpspells" then
+		-- [v42.09 i18n] Capture localized SPELL names from the running client.
+		--
+		-- Sku's spell table came from a Spell.dbc extraction (the spellKeys are
+		-- raw DBC column names), which is why it only exists for deDE and enUS -
+		-- producing a third one that way needs a client install of that language
+		-- plus extraction tooling. GetSpellInfo gives the same strings for free,
+		-- as long as it runs ON a client of the wanted language.
+		--
+		-- This matters beyond display: aura matching compares against live
+		-- combat-log names, which are localized. A French user picking the
+		-- English "Fireball" out of the aura menu would never match "Boule de
+		-- feu", and the aura would silently never fire.
+		--
+		-- SLICED over frames on purpose: ~49k GetSpellInfo calls in one go risks
+		-- the "script ran too long" watchdog, which this codebase has already hit
+		-- doing a full SpellDataTBC walk (SkuAuras/Core.lua:301).
+		if type(SkuDB) ~= "table" or type(SkuDB.SpellDataTBC) ~= "table" then
+			print("|cff80c0ffSkuDebug|r: SpellDataTBC not built yet - wait for login to finish.")
+			return
+		end
+		if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+		local tIds = {}
+		for tId in pairs(SkuDB.SpellDataTBC) do
+			if type(tId) == "number" then tIds[#tIds + 1] = tId end
+		end
+		table.sort(tIds)
+		local tOut = {locale = GetLocale(), names = {}}
+		local tPos, tFound = 1, 0
+		local tFrame = CreateFrame("Frame")
+		tFrame:SetScript("OnUpdate", function()
+			local tStart = debugprofilestop()
+			while tPos <= #tIds do
+				local tId = tIds[tPos]
+				local tOk, tName = pcall(GetSpellInfo, tId)
+				if tOk and type(tName) == "string" and tName ~= "" then
+					tOut.names[tId] = tName
+					tFound = tFound + 1
+				end
+				tPos = tPos + 1
+				if debugprofilestop() - tStart > 40 then return end
+			end
+			tFrame:SetScript("OnUpdate", nil)
+			tFrame:Hide()
+			SkuDebugLog.spellNameDump = tOut
+			print(string.format("|cff80c0ffSkuDebug|r: spell dump for %s - %d of %d resolved. /reload to persist.",
+				tostring(tOut.locale), tFound, #tIds))
+			if SkuOptions and SkuOptions.Voice then
+				pcall(function() SkuOptions.Voice:OutputStringBTtts("Zauber Namen fertig", false, true, 0.2) end)
+			end
+		end)
+		print(string.format("|cff80c0ffSkuDebug|r: dumping %d spell names for %s, running in background...",
+			#tIds, tostring(GetLocale())))
+		return
+	elseif aMsg == "tts" or aMsg:match("^tts%s") then
+		-- [v43.2] Handover-Audit der Blizzard-TTS-Pumpe.
+		--
+		-- Es gibt das hier, um die beiden Nachsperren der Pumpe an echtem Spiel zu
+		-- MESSEN, statt sie weiter von der Audiodatei-Pumpe zu erben: beide stehen
+		-- seit jeher auf 0.1 s, keine der beiden wurde je auf diesem Client
+		-- nachgemessen, und zusammen sind sie die Latenzuntergrenze jedes
+		-- Tastendrucks im Menue.
+		--
+		-- Die entscheidende Zahl ist "ohne Start": eine Aeusserung, die uebergeben
+		-- wurde und nie ein PLAYBACK_STARTED bekam, wurde vom asynchron landenden
+		-- StopSpeakingText getoetet -- genau das Rennen, gegen das postStop
+		-- existiert. Bleibt sie bei 0, war die Sperre zu vorsichtig und darf
+		-- kuerzer; steigt sie beim Verkuerzen, ist die Untergrenze gefunden.
+		--
+		-- Messvorgehen: /skudebug tts hold <postStop> <postSpeak> setzt beide fuer
+		-- DIESE Sitzung und nullt die Zaehler; danach normal spielen und /skudebug
+		-- tts lesen. Nicht persistent, mit Absicht -- eine falsche Zahl hier
+		-- kostet Sprache und darf die Sitzung nicht ueberleben.
+		if not (SkuOptions and SkuOptions.Voice and SkuOptions.Voice.GetBttsStats) then
+			print("|cff80c0ffSkuDebug|r: TTS-Statistik nicht verfuegbar (SkuVoice zu alt oder noch nicht geladen).")
+			return
+		end
+		local tArg = aMsg:match("^tts%s+(.-)%s*$") or ""
+		if tArg == "reset" then
+			SkuOptions.Voice:ResetBttsStats()
+			print("|cff80c0ffSkuDebug|r: TTS-Zaehler zurueckgesetzt.")
+			return
+		end
+		local tSetStop, tSetSpeak = tArg:match("^hold%s+([%d%.]+)%s+([%d%.]+)$")
+		if tSetStop and SkuOptions.Voice.SetBttsHolds then
+			SkuOptions.Voice:SetBttsHolds(tonumber(tSetStop), tonumber(tSetSpeak))
+			SkuOptions.Voice:ResetBttsStats()
+			local _, tNowStop, tNowSpeak = SkuOptions.Voice:GetBttsStats()
+			print(string.format("|cff80c0ffSkuDebug|r: postStop = %.3f s, postSpeak = %.3f s (nur diese Sitzung). Zaehler zurueckgesetzt.",
+				tNowStop, tNowSpeak))
+			return
+		end
+		-- [v43.7] /skudebug tts tail <delay> <hold> -- der Nachlauf-Schnitt (SkuVoice
+		-- tTailCutDelay). "tail off" schaltet ihn ab. Nur diese Sitzung.
+		local tTailDelay, tTailHold = tArg:match("^tail%s+([%d%.]+)%s+([%d%.]+)$")
+		if tArg == "tail off" then tTailDelay, tTailHold = "-1", nil end
+		if tTailDelay and SkuOptions.Voice.SetBttsTailCut then
+			local tNowDelay, tNowHold = SkuOptions.Voice:SetBttsTailCut(tonumber(tTailDelay), tonumber(tTailHold))
+			if tNowDelay < 0 then
+				print("|cff80c0ffSkuDebug|r: Nachlauf-Schnitt AUS (nur diese Sitzung).")
+			else
+				print(string.format("|cff80c0ffSkuDebug|r: Nachlauf-Schnitt delay = %.3f s, hold = %.3f s (nur diese Sitzung).", tNowDelay, tNowHold))
+			end
+			return
+		end
+		if tArg ~= "" and tArg ~= "show" then
+			print("|cff80c0ffSkuDebug|r: /skudebug tts [reset | hold <postStop> <postSpeak> | tail <delay> <hold> | tail off]")
+			return
+		end
+		local tS, tPostStop, tPostSpeak, tDup, tGap = SkuOptions.Voice:GetBttsStats()
+		local tPct = 0
+		if tS.handed > 0 then tPct = (tS.lost / tS.handed) * 100 end
+		local tHead = string.format("postStop %.3f s, postSpeak %.3f s, Dublettenfenster %.2f s", tPostStop, tPostSpeak, tDup)
+		local tL1 = string.format("uebergeben %d, gestartet %d", tS.handed, tS.started)
+		local tL1b = string.format("VERLOREN %d (%.1f Prozent) -- die eine Zahl, die zaehlt", tS.lost, tPct)
+		local tL1c = string.format("absichtlich abgeloest %d (normal)", tS.superseded)
+		local tL2 = string.format("abgelehnt %d", tS.failed)
+		local tL3 = string.format("Dubletten verschluckt %d, per Taste durchgelassen %d", tS.dupSuppressed, tS.userAction)
+		local tL4 = string.format("Echo-Zeichen %d", tS.echo)
+		print("|cff80c0ffSkuDebug TTS|r: "..tHead)
+		print("  "..tL1)
+		print("  "..tL1b)
+		print("  "..tL1c)
+		print("  "..tL2)
+		print("  "..tL3)
+		print("  "..tL4)
+		-- Abstand zwischen dem Stop und der Uebergabe, in 10-ms-Stufen, mit der
+		-- Zahl der dabei verlorenen Aeusserungen. Das ist die MESSUNG, aus der
+		-- sich die kuerzeste sichere Nachsperre direkt ablesen laesst: die
+		-- niedrigste Stufe, die noch 0 verloren zeigt. Bei der ausgelieferten
+		-- Sperre von 0.1 s landet alles in "100+", die Kurve bleibt also leer --
+		-- zum Messen des kurzen Endes "/skudebug tts hold 0 0" setzen.
+		local tAny = false
+		for i = 1, 11 do if tGap[i].n > 0 then tAny = true end end
+		if not tAny then
+			print("  Abstand Stop bis Uebergabe: noch keine Messwerte - fuer die Kurve /skudebug tts hold 0 0 setzen und normal spielen.")
+		else
+			print("  Abstand Stop bis Uebergabe (Stufe: Anzahl, davon verloren):")
+			for i = 1, 11 do
+				if tGap[i].n > 0 then
+					local tLabel = (i == 11) and "100+ ms" or (((i - 1) * 10).." bis "..((i * 10) - 1).." ms")
+					local tLine = string.format("%s: %d, davon verloren %d", tLabel, tGap[i].n, tGap[i].lost)
+					print("    "..tLine)
+					dprint("BTTS GAP", tLine)
+				end
+			end
+		end
+		-- Auch in den Ring, damit die Messung in einer Aufzeichnung steht und
+		-- nicht nur im Chatfenster stand.
+		dprint("BTTS STATS", tHead, tL1, tL1b, tL1c, tL2, tL3, tL4)
+		return
+	elseif aMsg == "clear" then
+		if type(SkuDebugLog) == "table" then SkuDebugLog.lines = {} ; SkuDebugLog.seq = 0 end
+		print("|cff80c0ffSkuDebug|r: log cleared.")
+		return
+	elseif aMsg == "show" then
+		local tLines = (type(SkuDebugLog) == "table" and SkuDebugLog.lines) or {}
+		local tStart = math.max(1, #tLines - 9)
+		if #tLines == 0 then print("|cff80c0ffSkuDebug|r: log empty.") return end
+		for i = tStart, #tLines do
+			local e = tLines[i]
+			if type(e) == "table" then   -- legacy format 1 entry
+				print(string.format("#%s [%s] %s", tostring(e.seq), e.t or "?", e.msg or ""))
+			else
+				local tSeq, tT, tMsg = tostring(e):match("^(%d+)|([^|]*)|(.*)$")
+				print(string.format("#%s [%s] %s", tSeq or "?", tT or "?", tMsg or tostring(e)))
+			end
+		end
+		return
+	elseif aMsg ~= "" then
+		print("|cff80c0ffSkuDebug|r: usage: /skudebug on|off|print on|print off|log on|log off|verbose on|verbose off|size <n>|locale <loc>|dumpmapnames|dumpspells|clear|show")
+	end
+	if d.log and not tWasLog then Sku:DebugLogMark("log enabled") end
+	print(string.format("|cff80c0ffSkuDebug|r: print=%s log=%s verbose=%s ring=%d/%d",
+		tostring(d.print), tostring(d.log), tostring(d.verbose),
+		(type(SkuDebugLog) == "table" and type(SkuDebugLog.lines) == "table") and #SkuDebugLog.lines or 0,
+		tDebugLogMax()))
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- Performance monitoring
+Sku.PerformanceStart = false
+Sku.PerformanceData = {}
+
+-- Richer probe recorder. The legacy Sku.PerformanceData[name] holds only a noisy
+-- 2-sample rolling figure ((old+new)/2), which can't confirm a small change.
+-- Sku:Probe additionally tracks count / total / max / last per name in
+-- Sku.PerfStats, and sets Sku.PerformanceData[name] to the TRUE running average
+-- (total/count) so the on-screen frame and /skuperf stay populated. Cheap: a few
+-- adds and one compare, no allocation after the first call per name. Use it for
+-- probes we want to measure optimizations against; the other probe sites keep
+-- the legacy EWMA write until/unless they need the same treatment.
+Sku.PerfStats = {}
+function Sku:Probe(aName, aMs)
+	local s = Sku.PerfStats[aName]
+	if not s then
+		s = {count = 0, total = 0, max = 0, last = 0}
+		Sku.PerfStats[aName] = s
+	end
+	s.count = s.count + 1
+	s.total = s.total + aMs
+	s.last = aMs
+	if aMs > s.max then s.max = aMs end
+	Sku.PerformanceData[aName] = s.total / s.count
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- Per-module load timing  [Workstream 3 / load profiling]
+--
+-- Sku is built from ~10 AceAddon addons plus their sub-modules. AceAddon routes
+-- every one of them through AceAddon:InitializeAddon (OnInitialize, fired at the
+-- ADDON_LOADED sweep) and AceAddon:EnableAddon (OnEnable, fired at PLAYER_LOGIN).
+-- We wrap those two so each addon/module's load cost is timed automatically - no
+-- need to hand-instrument every file. InitializeAddon is non-recursive, so its
+-- number is clean per addon. EnableAddon recurses into child modules, so we keep
+-- a tiny per-depth stack and subtract child time to report a clean SELF figure
+-- (plus the inclusive total). Results: Sku.PerfModules[name] = {init=, enableSelf=,
+-- enableTotal=}. AceAddon is shared by ALL Ace3 addons in the client, so this also
+-- captures other addons' modules (their OnEnable all runs at the single
+-- PLAYER_LOGIN after Sku loaded) - useful for the general picture. We snapshot the
+-- table at first PLAYER_ENTERING_WORLD into Sku.PerfModulesLoad so later
+-- enable/disable toggles can't overwrite the load-time reading.
+Sku.PerfModules = Sku.PerfModules or {}
+do
+	local AceAddon = LibStub and LibStub("AceAddon-3.0", true)
+	if AceAddon and not Sku._perfHookedAce then
+		Sku._perfHookedAce = true
+
+		local function tModRec(aName)
+			local r = Sku.PerfModules[aName]
+			if not r then r = {init = 0, enableSelf = 0, enableTotal = 0}; Sku.PerfModules[aName] = r end
+			return r
+		end
+
+		local tOrigInit = AceAddon.InitializeAddon
+		AceAddon.InitializeAddon = function(self, aAddon)
+			local tName = (type(aAddon) == "table" and aAddon.name) or tostring(aAddon)
+			local t0 = debugprofilestop()
+			tOrigInit(self, aAddon)
+			local dt = debugprofilestop() - t0
+			if dt < 0 then dt = 0 end
+			tModRec(tName).init = dt
+		end
+
+		-- EnableAddon recurses into child modules; keep per-depth child-time
+		-- accumulators so each entry reports SELF time (total minus children).
+		local tEnableStack = {}
+		local tOrigEnable = AceAddon.EnableAddon
+		AceAddon.EnableAddon = function(self, aAddon)
+			local tName = (type(aAddon) == "string" and aAddon)
+				or (type(aAddon) == "table" and aAddon.name) or tostring(aAddon)
+			local tDepth = #tEnableStack + 1
+			tEnableStack[tDepth] = 0
+			local t0 = debugprofilestop()
+			local tRet = tOrigEnable(self, aAddon)
+			local tTotal = debugprofilestop() - t0
+			if tTotal < 0 then tTotal = 0 end
+			local tChild = tEnableStack[tDepth] or 0
+			tEnableStack[tDepth] = nil
+			if tDepth > 1 then
+				tEnableStack[tDepth - 1] = (tEnableStack[tDepth - 1] or 0) + tTotal
+			end
+			local tSelf = tTotal - tChild
+			if tSelf < 0 then tSelf = 0 end
+			local r = tModRec(tName)
+			r.enableTotal = tTotal
+			r.enableSelf = tSelf
+			return tRet
+		end
+	end
+end
+
+function Sku:Performance()
+	if not _G["SkuPerformance"] then
+		local f = CreateFrame("Frame", "SkuPerformance", UIParent, BackdropTemplateMixin and "BackdropTemplate")
+		local ttime = 0
+		f:SetMovable(true)
+		f:EnableMouse(true)
+		f:SetClampedToScreen(true)
+		f:RegisterForDrag("LeftButton")
+		f:SetFrameStrata("DIALOG")
+		f:SetFrameLevel(129)
+		f:SetSize(450, 170)
+		f:SetPoint("TOP", UIParent, "TOP")
+		f:SetBackdrop({bgFile = [[Interface\ChatFrame\ChatFrameBackground]], edgeFile = "", tile = false, tileSize = 0, edgeSize = 32, insets = {left = 0, right = 0, top = 0, bottom = 0}})
+		f:SetBackdropColor(0, 0, 0, 1)
+		f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+		f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+		f:SetResizable(true)
+      --f:SetResizeBounds(500, 500)
+
+		local rb = CreateFrame("Button", "SkuPerformanceResizeButton", f)
+		rb:SetPoint("BOTTOMRIGHT", -6, 7)
+		rb:SetSize(16, 16)
+
+		rb:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+		rb:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+		rb:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+
+		rb:SetScript("OnMouseDown", function(self, button)
+			if button == "LeftButton" then
+				f:StartSizing("BOTTOMRIGHT")
+				self:GetHighlightTexture():Hide() -- more noticeable
+			end
+		end)
+		rb:SetScript("OnMouseUp", function(self, button)
+			f:StopMovingOrSizing()
+			self:GetHighlightTexture():Show()
+			f:SetWidth(f:GetWidth())
+
+			for x = 1, 10 do
+				local fs = _G["SkuPerformanceFSl"..x]
+				fs:SetSize((f:GetWidth() / 3)*2, 200)
+				local fs = _G["SkuPerformanceFSr"..x]
+				fs:SetPoint("TOPLEFT", f, "TOPLEFT", f:GetWidth() / 2, -((x-1) * 15))
+				fs:SetSize((f:GetWidth() / 3)*1, 200)
+			end			
+		end)
+
+		local SkuPerformanceOnUpdateTime = 0
+		f:SetScript('OnUpdate', function(self, time)
+			if Sku.PerformanceStart ~= true then
+				return
+			end
+			SkuPerformanceOnUpdateTime = SkuPerformanceOnUpdateTime + time
+			if SkuPerformanceOnUpdateTime > 0.1 then
+				local xs = 1
+				for i, v in pairs(Sku.PerformanceData) do
+					_G["SkuPerformanceFSl"..xs]:SetText(i)
+					_G["SkuPerformanceFSr"..xs]:SetText(tostring(v))
+					xs = xs + 1
+				end
+
+				SkuPerformanceOnUpdateTime = 0
+			end
+		end)
+
+		for x = 1, 10 do
+			local fs = f:CreateFontString("SkuPerformanceFSl"..x)
+			fs:SetFontObject(SystemFont_Small)
+			fs:SetTextColor(1, 1, 1, 1)
+			fs:SetJustifyH("LEFT")
+			fs:SetJustifyV("TOP")
+			
+			fs:SetPoint("TOPLEFT", f, "TOPLEFT", 0, -((x-1) * 15))
+			fs:SetText("")
+			fs:SetSize(f:GetWidth() / 2, 200)
+			local fs = f:CreateFontString("SkuPerformanceFSr"..x)
+			fs:SetFontObject(SystemFont_Small)
+			fs:SetTextColor(1, 1, 1, 1)
+			fs:SetJustifyH("LEFT")
+			fs:SetJustifyV("TOP")
+			fs:SetPoint("TOPLEFT", f, "TOPLEFT", f:GetWidth() / 2, -((x-1) * 15))
+			fs:SetText("")
+			fs:SetSize(f:GetWidth() / 2, 200)
+		end
+
+		_G["SkuPerformance"]:Show()
+		Sku.PerformanceStart = true
+		return
+	end
+
+	if _G["SkuPerformance"]:IsShown() == true then
+		_G["SkuPerformance"]:Hide()
+		Sku.PerformanceStart = false
+	else
+		_G["SkuPerformance"]:Show()
+		Sku.PerformanceStart = true
+	end
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- Performance readout (screen-reader friendly)  [Workstream 3 / P1]
+--
+-- The on-screen SkuPerformance frame above is sighted-only. This block adds a
+-- TEXT readout of the same data, plus load-time milestones and (optional)
+-- per-addon CPU usage. Every line is written BOTH to the chat frame (live,
+-- read by the screen reader) and to the persisted SkuDebugLog ring (read back
+-- out-of-game after a /reload, like the rest of Sku's logging). All combat
+-- probe numbers are milliseconds; load milestones are seconds since core load.
+--
+--   /skuperf            -- dump everything (load + modules + combat + addons + mem, read-only)
+--   /skuperf load       -- Sku.metric load-time milestones (the coarse freeze timeline)
+--   /skuperf files      -- per-file load time from the _ps*.lua TOC stubs (which data file is slow)
+--   /skuperf modules    -- per Sku module/addon init+enable time (what in Sku is slow)
+--   /skuperf addons     -- ALL addons by load CPU, slowest first (needs scriptProfile; enables it)
+--   /skuperf mem        -- ALL addons by memory, largest first (no setup; a load-cost proxy)
+--   /skuperf combat     -- Sku.PerformanceData probes, slowest first
+--   /skuperf cpu        -- Sku-family CPU usage (needs scriptProfile; enables it)
+--   /skuperf reset      -- clear the rolling combat probe averages
+--   /skuperf frame      -- toggle the old on-screen frame (sighted devs)
+--
+-- TWO views answer "why is my login slow":
+--   * the GENERAL picture -> /skuperf addons (CPU) or /skuperf mem (no setup):
+--     which of ALL your addons cost the most at load.
+--   * the SKU picture -> /skuperf modules + /skuperf load: which Sku module and
+--     which load phase (file-load -> login -> first frame) cost the most.
+-- Both are auto-captured to the SkuDebugLog ring at first PEW (read back after a
+-- /reload), so the load story is always recorded without typing a command.
+--
+-- The combat probes (Sku.PerformanceData[...]) are reset to {} every load and
+-- are NOT persisted, so read them in the same session you captured them (run
+-- the scenario, then /skuperf combat). Load milestones ARE auto-persisted to
+-- the ring at first PLAYER_ENTERING_WORLD, so "loading time" is always
+-- captured without running a command.
+
+-- Emit one line to chat AND the persisted ring (so it is readable live by the
+-- screen reader and out-of-game after /reload, regardless of the dprint flag).
+local function tPerfEmitChat(aLine)
+	print(aLine)
+	tDebugLogAppend(aLine)
+end
+-- Ring-only emitter for the silent auto-capture at login (no chat/TTS spam).
+local function tPerfEmitQuiet(aLine)
+	tDebugLogAppend(aLine)
+end
+
+-- Resolve the AddOn CPU APIs across client versions (modern clients moved
+-- several AddOn APIs under C_AddOns; older ones keep the globals).
+local function tUpdateAddOnCpu()
+	if C_AddOns and C_AddOns.UpdateAddOnCPUUsage then C_AddOns.UpdateAddOnCPUUsage()
+	elseif UpdateAddOnCPUUsage then UpdateAddOnCPUUsage() end
+end
+local function tGetAddOnCpu(aNameOrIndex)
+	if C_AddOns and C_AddOns.GetAddOnCPUUsage then return C_AddOns.GetAddOnCPUUsage(aNameOrIndex) end
+	if GetAddOnCPUUsage then return GetAddOnCPUUsage(aNameOrIndex) end
+	return nil
+end
+local function tGetNumAddOns()
+	if C_AddOns and C_AddOns.GetNumAddOns then return C_AddOns.GetNumAddOns() end
+	if GetNumAddOns then return GetNumAddOns() end
+	return 0
+end
+local function tGetAddOnName(aIndex)
+	local f = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
+	if not f then return nil end
+	return (f(aIndex))  -- field 1 = name
+end
+
+function Sku:PerformanceDumpCombat(aEmit)
+	aEmit = aEmit or tPerfEmitChat
+	aEmit("|cff80c0ffSkuPerf|r combat probes (ms, slowest first):")
+	local tRows = {}
+	for k, v in pairs(Sku.PerformanceData) do
+		tRows[#tRows + 1] = {k, tonumber(v) or 0}
+	end
+	if #tRows == 0 then
+		aEmit("  (no data yet - run the scenario first, e.g. enter combat)")
+		return
+	end
+	table.sort(tRows, function(a, b) return a[2] > b[2] end)
+	for _, r in ipairs(tRows) do
+		local s = Sku.PerfStats[r[1]]
+		if s then
+			-- Stable, measurable numbers: true average + how many calls, the
+			-- worst single call, and the total time spent across the run.
+			aEmit(string.format("  %.3f ms avg  %s  (n=%d, max=%.3f ms, total=%.1f ms)",
+				r[2], r[1], s.count, s.max, s.total))
+		else
+			aEmit(string.format("  %.3f ms  %s", r[2], r[1]))
+		end
+	end
+end
+
+function Sku:PerformanceDumpLoad(aEmit)
+	aEmit = aEmit or tPerfEmitChat
+	aEmit("|cff80c0ffSkuPerf|r load milestones (seconds since core load):")
+	if #Sku.metric == 0 then
+		aEmit("  (no milestones captured)")
+		return
+	end
+	for _, m in ipairs(Sku.metric) do
+		aEmit(string.format("  %.3f s  %s", tonumber(m[2]) or 0, tostring(m[1])))
+	end
+end
+
+-- Per-file load time (TEMPORARY measurement) from the SkuFileLoadStamps harness
+-- (SkuPerfFileStamp.lua + the _ps*.lua TOC stubs). Each line is the gap between
+-- two consecutive stamps = the load time (parse + table construction) of the TOC
+-- files between them. This is how we attribute the file-load freeze to the big
+-- route files. Negative numbers mean GetTimePreciseSec was unavailable and the
+-- fallback clock straddled Core.lua's debugprofilestart reset - ignore those.
+function Sku:PerformanceDumpFiles(aEmit)
+	aEmit = aEmit or tPerfEmitChat
+	aEmit("|cff80c0ffSkuPerf|r per-file load time (seconds, gaps between TOC stamps):")
+	local s = SkuFileLoadStamps
+	if not s or #s < 2 then
+		aEmit("  (no file stamps - measurement stubs not loaded)")
+		return
+	end
+	for i = 2, #s do
+		aEmit(string.format("  %.3f s  %s  ->  %s", (s[i][2] or 0) - (s[i-1][2] or 0), tostring(s[i-1][1]), tostring(s[i][1])))
+	end
+	aEmit(string.format("  %.3f s  TOTAL stamped span", (s[#s][2] or 0) - (s[1][2] or 0)))
+end
+
+-- Per-module load timing from the AceAddon init/enable hook. Reads the PEW
+-- snapshot when present (the load-time picture) so post-login toggles don't skew
+-- it; otherwise the live table. Ranked by init+enableSelf (the work charged to
+-- THAT module). Capped to the top 30 so the chat/ring stays readable.
+function Sku:PerformanceDumpModules(aEmit)
+	aEmit = aEmit or tPerfEmitChat
+	local tSrc = Sku.PerfModulesLoad or Sku.PerfModules
+	aEmit("|cff80c0ffSkuPerf|r module load timing (ms, slowest first, top 30):")
+	local tRows = {}
+	for k, v in pairs(tSrc) do
+		tRows[#tRows + 1] = {k, (v.enableSelf or 0) + (v.init or 0), v}
+	end
+	if #tRows == 0 then
+		aEmit("  (no module timing captured - hook not installed?)")
+		return
+	end
+	table.sort(tRows, function(a, b) return a[2] > b[2] end)
+	for i = 1, math.min(30, #tRows) do
+		local v = tRows[i][3]
+		aEmit(string.format("  %.1f ms  %s  (init=%.1f, enable=%.1f)",
+			tRows[i][2], tRows[i][1], v.init or 0, v.enableSelf or 0))
+	end
+end
+
+-- All-addon load cost (CPU ms) - the "what is slowing my login in general" view.
+-- Needs scriptProfile (same gate/recipe as the Sku-family CPU dump). The number
+-- is cumulative-this-session, but the auto-snapshot runs at first PEW so it then
+-- reflects load-time execution. Top 30 plus an all-addons total.
+function Sku:PerformanceDumpAddons(aEmit, aAllowEnable)
+	aEmit = aEmit or tPerfEmitChat
+	local tEnabled = (GetCVar and GetCVar("scriptProfile") == "1")
+	if not tEnabled then
+		if aAllowEnable and SetCVar then
+			SetCVar("scriptProfile", "1")
+			aEmit("|cff80c0ffSkuPerf|r CPU profiling was OFF. Enabled scriptProfile - type /reload, then /skuperf addons.")
+		else
+			aEmit("|cff80c0ffSkuPerf|r all-addon CPU needs scriptProfile (run /skuperf addons to enable, needs /reload).")
+		end
+		return
+	end
+	tUpdateAddOnCpu()
+	aEmit("|cff80c0ffSkuPerf|r all-addon load CPU (ms, slowest first, top 30):")
+	local tRows, tTotal = {}, 0
+	for i = 1, tGetNumAddOns() do
+		local tUse = tGetAddOnCpu(i) or 0
+		tTotal = tTotal + tUse
+		tRows[#tRows + 1] = {tGetAddOnName(i) or ("#" .. i), tUse}
+	end
+	table.sort(tRows, function(a, b) return a[2] > b[2] end)
+	for i = 1, math.min(30, #tRows) do
+		aEmit(string.format("  %.1f ms  %s", tRows[i][2], tRows[i][1]))
+	end
+	aEmit(string.format("  %.1f ms  (all %d addons total)", tTotal, #tRows))
+end
+
+-- All-addon memory footprint (KB) - a no-setup proxy for "heavy" addons. This is
+-- memory, not time, but a large footprint usually tracks a large load cost, and
+-- unlike the CPU view it needs no scriptProfile/reload. Top 30 plus a total.
+function Sku:PerformanceDumpMem(aEmit)
+	aEmit = aEmit or tPerfEmitChat
+	local tUpdate = (C_AddOns and C_AddOns.UpdateAddOnMemoryUsage) or UpdateAddOnMemoryUsage
+	local tGet = (C_AddOns and C_AddOns.GetAddOnMemoryUsage) or GetAddOnMemoryUsage
+	if not tGet then
+		aEmit("|cff80c0ffSkuPerf|r addon memory API not available on this client.")
+		return
+	end
+	if tUpdate then tUpdate() end
+	aEmit("|cff80c0ffSkuPerf|r all-addon memory (KB, largest first, top 30):")
+	local tRows, tTotal = {}, 0
+	for i = 1, tGetNumAddOns() do
+		local tKb = tGet(i) or 0
+		tTotal = tTotal + tKb
+		tRows[#tRows + 1] = {tGetAddOnName(i) or ("#" .. i), tKb}
+	end
+	table.sort(tRows, function(a, b) return a[2] > b[2] end)
+	for i = 1, math.min(30, #tRows) do
+		aEmit(string.format("  %.0f KB  %s", tRows[i][2], tRows[i][1]))
+	end
+	aEmit(string.format("  %.0f KB  (all %d addons total)", tTotal, #tRows))
+end
+
+-- aAllowEnable: only the explicit "/skuperf cpu" flips the scriptProfile CVar
+-- (it needs a /reload to take effect); the catch-all dump stays read-only.
+function Sku:PerformanceDumpCpu(aEmit, aAllowEnable)
+	aEmit = aEmit or tPerfEmitChat
+	if not tGetAddOnCpu(1) and not (GetCVar and GetCVar("scriptProfile")) then
+		aEmit("|cff80c0ffSkuPerf|r CPU profiling API not available on this client.")
+		return
+	end
+	local tEnabled = (GetCVar and GetCVar("scriptProfile") == "1")
+	if not tEnabled then
+		if aAllowEnable and SetCVar then
+			SetCVar("scriptProfile", "1")
+			aEmit("|cff80c0ffSkuPerf|r CPU profiling was OFF. Enabled scriptProfile - type /reload, then /skuperf cpu.")
+		else
+			aEmit("|cff80c0ffSkuPerf|r CPU profiling is OFF (run /skuperf cpu to enable, needs /reload).")
+		end
+		return
+	end
+	tUpdateAddOnCpu()
+	aEmit("|cff80c0ffSkuPerf|r addon CPU usage (ms, cumulative this session, Sku family):")
+	local tRows, tTotal = {}, 0
+	for i = 1, tGetNumAddOns() do
+		local tName = tGetAddOnName(i)
+		local tUse = tGetAddOnCpu(i) or 0
+		tTotal = tTotal + tUse
+		if tName and tName:find("^Sku") then
+			tRows[#tRows + 1] = {tName, tUse}
+		end
+	end
+	table.sort(tRows, function(a, b) return a[2] > b[2] end)
+	for _, r in ipairs(tRows) do
+		aEmit(string.format("  %.1f ms  %s", r[2], r[1]))
+	end
+	aEmit(string.format("  %.1f ms  (all addons total)", tTotal))
+end
+
+SLASH_SKUPERF1 = "/skuperf"
+SlashCmdList["SKUPERF"] = function(aMsg)
+	aMsg = (aMsg or ""):lower():match("^%s*(.-)%s*$")
+	if aMsg == "combat" then
+		Sku:PerformanceDumpCombat()
+	elseif aMsg == "load" then
+		Sku:PerformanceDumpLoad()
+	elseif aMsg == "files" then
+		Sku:PerformanceDumpFiles()
+	elseif aMsg == "modules" then
+		Sku:PerformanceDumpModules()
+	elseif aMsg == "addons" then
+		Sku:PerformanceDumpAddons(nil, true)
+	elseif aMsg == "mem" then
+		Sku:PerformanceDumpMem()
+	elseif aMsg == "cpu" then
+		Sku:PerformanceDumpCpu(nil, true)
+	elseif aMsg == "reset" then
+		Sku.PerformanceData = {}
+		Sku.PerfStats = {}
+		tPerfEmitChat("|cff80c0ffSkuPerf|r combat probe averages cleared.")
+	elseif aMsg == "frame" then
+		Sku:Performance()
+	elseif aMsg == "" or aMsg == "all" then
+		Sku:PerformanceDumpLoad()
+		Sku:PerformanceDumpFiles()
+		Sku:PerformanceDumpModules()
+		Sku:PerformanceDumpCombat()
+		Sku:PerformanceDumpAddons(nil, false)
+		Sku:PerformanceDumpMem()
+	else
+		print("|cff80c0ffSkuPerf|r usage: /skuperf [load|files|modules|combat|addons|mem|cpu|reset|frame]")
+	end
+end
+
+--------------------------------------------------------------------------------
+-- /skufollowprobe (/sfp) — TEMP diagnostic for the planned "stuck while
+-- following" collision feature. For the unit you are currently following (or
+-- target / party1 as a fallback) it reports which distance/position signals
+-- THIS client actually returns, then samples them for ~5s at the collision-loop
+-- cadence (0.15s) so we can see whether they move while the leader walks and you
+-- stand still. Answers the open questions: does UnitPosition/UnitDistanceSquared
+-- work out in the world AND inside instances, how coarse is LibRangeCheck, and
+-- can we tell "leader moving + me pinned" apart. All samples go to the
+-- SkuDebugLog ring via dprint (log is ON by default in Sku 42); read them back
+-- from ...\SavedVariables\Sku.lua after a /reload. Delete once validated.
+--------------------------------------------------------------------------------
+local function tSkuFollowProbeResolveUnit()
+	-- 1) live follow token if Sku already resolved one
+	if SkuStatus and SkuStatus.follow and SkuStatus.follow ~= 0 then
+		if SkuStatus.followUnitId and SkuStatus.followUnitId ~= "" and UnitExists(SkuStatus.followUnitId) then
+			return SkuStatus.followUnitId, "followUnitId"
+		end
+		-- 2) resolve by follow name across raid/party
+		local tName = SkuStatus.followUnitName
+		if tName and tName ~= "" then
+			for x = 1, 40 do if UnitName("raid"..x) == tName then return "raid"..x, "followName" end end
+			for x = 1, 5 do if UnitName("party"..x) == tName then return "party"..x, "followName" end end
+		end
+	end
+	-- 3) fallbacks so the probe is useful even when not following
+	if UnitExists("target") then return "target", "target" end
+	if UnitExists("party1") then return "party1", "party1" end
+	return nil, "none"
+end
+
+-- UnitPosition returns two planar coords + z + instanceID; x/y order is
+-- irrelevant here since we only ever take Euclidean deltas/distances.
+local function tSkuFollowProbePos(aUnit)
+	if type(UnitPosition) == "function" and aUnit then
+		local a, b = UnitPosition(aUnit)
+		if a and b then return a, b end
+	end
+	return nil, nil
+end
+
+local function tSkuFollowProbeDist(aUnit)
+	if type(UnitDistanceSquared) == "function" and aUnit then
+		local d2, checked = UnitDistanceSquared(aUnit)
+		if checked and d2 then return math.sqrt(d2), checked end
+		return nil, checked
+	end
+	return nil, nil
+end
+
+-- GetRange returns two range-bracket bounds. Print them raw/ordered: Sku's own
+-- RangeCheck.lua labels the returns in the opposite order to the LibRangeCheck
+-- doc, so we don't trust either name here.
+local function tSkuFollowProbeLib(aUnit)
+	if SkuOptions and SkuOptions.RangeCheck and SkuOptions.RangeCheck.GetRange and aUnit then
+		local ok, r1, r2 = pcall(function() return SkuOptions.RangeCheck:GetRange(aUnit) end)
+		if ok then return r1, r2 end
+	end
+	return nil, nil
+end
+
+local tSkuFollowProbeFrame
+local function tSkuFollowProbeStart()
+	if Sku and Sku.debug then Sku.debug.log = true end   -- ensure samples persist to the ring
+
+	local tUnit, tHow = tSkuFollowProbeResolveUnit()
+	local _, tInstType = IsInInstance()
+
+	local pa, pb = tSkuFollowProbePos("player")
+	local ua, ub = tUnit and tSkuFollowProbePos(tUnit) or nil, nil
+	if tUnit then ua, ub = tSkuFollowProbePos(tUnit) end
+	local tDist, tDChecked = nil, nil
+	if tUnit then tDist, tDChecked = tSkuFollowProbeDist(tUnit) end
+	local tR1, tR2 = nil, nil
+	if tUnit then tR1, tR2 = tSkuFollowProbeLib(tUnit) end
+	local tInRange, tRChecked
+	if type(UnitInRange) == "function" and tUnit then tInRange, tRChecked = UnitInRange(tUnit) end
+
+	dprint("=== SkuFollowProbe START ===")
+	dprint("instance", tostring(tInstType), "unit", tostring(tUnit), "via", tHow,
+		"name", tUnit and tostring((UnitName(tUnit))) or "-",
+		"isPlayer", tUnit and tostring((UnitIsPlayer(tUnit))) or "-",
+		"inParty", tUnit and tostring((UnitInParty(tUnit))) or "-",
+		"inRaid", tUnit and tostring((UnitInRaid(tUnit))) or "-")
+	dprint("player UnitPosition", tostring(pa), tostring(pb))
+	dprint("unit UnitPosition", tostring(ua), tostring(ub))
+	dprint("UnitDistanceSquared yd", tostring(tDist), "checked", tostring(tDChecked),
+		"UnitInRange", tostring(tInRange), "checked", tostring(tRChecked))
+	dprint("LibRangeCheck GetRange raw", tostring(tR1), tostring(tR2))
+
+	-- audible one-shot summary (deDE)
+	local tSpeak
+	if not tUnit then
+		tSpeak = "Probe. Kein Zielunit."
+	else
+		tSpeak = "Probe. "..tHow.." "..(UnitName(tUnit) or "?")..". "
+			.."Position "..(ua and "ja" or "nein")..". "
+			.."Distanz "..(tDist and tostring(math.floor(tDist*10)/10) or "nein")..". "
+			.."Lib "..(tR1 and tostring(tR1) or "nein").." bis "..(tR2 and tostring(tR2) or "nein")
+	end
+	if SkuOptions and SkuOptions.Voice then SkuOptions.Voice:OutputString(tSpeak, true, true, 0.2) end
+
+	if not tUnit then return end
+
+	-- 5s sampler at the collision-loop cadence
+	tSkuFollowProbeFrame = tSkuFollowProbeFrame or CreateFrame("Frame")
+	local tElapsed, tAcc, tN = 0, 0, 0
+	local tLpa, tLpb = pa, pb
+	local tLua, tLub = ua, ub
+	local tLDist = tDist
+	tSkuFollowProbeFrame:SetScript("OnUpdate", function(self, time)
+		tElapsed = tElapsed + time
+		tAcc = tAcc + time
+		if tAcc < 0.15 then return end
+		tAcc = 0
+		tN = tN + 1
+		local cpa, cpb = tSkuFollowProbePos("player")
+		local cua, cub = tSkuFollowProbePos(tUnit)
+		local cdist = tSkuFollowProbeDist(tUnit)
+		local myDelta = (cpa and tLpa) and math.sqrt((cpa-tLpa)^2 + (cpb-tLpb)^2) or nil
+		local ldDelta = (cua and tLua) and math.sqrt((cua-tLua)^2 + (cub-tLub)^2) or nil
+		local gapDelta = (cdist and tLDist) and (cdist - tLDist) or nil
+		local mr1, mr2 = tSkuFollowProbeLib(tUnit)
+		dprint("sample", tN,
+			"myDelta", myDelta and tostring(math.floor(myDelta*1000)/1000) or "-",
+			"leaderDelta", ldDelta and tostring(math.floor(ldDelta*1000)/1000) or "-",
+			"dist", cdist and tostring(math.floor(cdist*100)/100) or "-",
+			"gapDelta", gapDelta and tostring(math.floor(gapDelta*100)/100) or "-",
+			"lib", tostring(mr1), tostring(mr2))
+		tLpa, tLpb = cpa or tLpa, cpb or tLpb
+		tLua, tLub = cua or tLua, cub or tLub
+		tLDist = cdist or tLDist
+		if tElapsed >= 5 then
+			self:SetScript("OnUpdate", nil)
+			dprint("=== SkuFollowProbe END, samples="..tN.." ===")
+			if SkuOptions and SkuOptions.Voice then
+				SkuOptions.Voice:OutputString("Probe fertig, "..tN.." Samples", true, true, 0.2)
+			end
+		end
+	end)
+end
+
+SLASH_SKUFOLLOWPROBE1 = "/skufollowprobe"
+SLASH_SKUFOLLOWPROBE2 = "/sfp"
+SlashCmdList["SKUFOLLOWPROBE"] = function()
+	tSkuFollowProbeStart()
+end
+
+--------------------------------------------------------------------------------
+-- /skucollisionprobe (/scp [seconds]) — TEMP diagnostic for a planned
+-- DUNGEON-CAPABLE self-collision ("walked into a wall") feature. Fall detection
+-- works in instances because IsFalling() is a physics STATE, not a coordinate;
+-- the open question here is whether GetUnitSpeed("player") gives an equally
+-- coordinate-free "am I actually moving" signal -- i.e. does currentSpeed
+-- collapse to ~0 while a forward/strafe/autorun key is still held against a
+-- wall, or does it keep reporting the intended run speed? Sku already tracks the
+-- INTENT (SkuCoreMovement.Flags.MoveForward/MoveBackward/StrafeLeft/StrafeRight/
+-- AutoRun, from the MoveForwardStart-style hooks); this samples that intent
+-- against GetUnitSpeed + IsFalling at the collision-loop cadence (0.15s) so we
+-- can see the mismatch. UnitPosition delta is logged too as an OUTDOOR
+-- cross-check (it goes nil in instances -- that dead column is exactly the point
+-- GetUnitSpeed has to cover). All samples go to the SkuDebugLog ring via dprint;
+-- read them back from ...\SavedVariables\Sku.lua after a /reload. Default 8s,
+-- optional arg clamps to 3..30s. Delete once validated.
+--
+-- How to read it: walk straight into a wall for a few seconds, then run freely
+-- for a few more, /reload, and compare. If the WALL segment shows currentSpeed
+-- (and ratio) near 0 while intent stays "true", the feature is just a rewire of
+-- the existing coord-based self-collision block onto GetUnitSpeed for instances.
+--------------------------------------------------------------------------------
+-- Translational movement intent only (deliberately NOT pure turning: turning in
+-- place is not a collision and Flags.IsTurningOrAutorunningOrStrafing conflates
+-- it). Returns a bool + a compact "which keys" string for the log.
+local function tSkuCollisionProbeIntent()
+	local f = SkuCoreMovement and SkuCoreMovement.Flags or {}
+	local tSet = {}
+	if f.MoveForward == true then tSet[#tSet + 1] = "F" end
+	if f.MoveBackward == true then tSet[#tSet + 1] = "B" end
+	if f.StrafeLeft == true then tSet[#tSet + 1] = "L" end
+	if f.StrafeRight == true then tSet[#tSet + 1] = "R" end
+	if f.AutoRun == true then tSet[#tSet + 1] = "A" end
+	return #tSet > 0, (#tSet > 0 and table.concat(tSet, "") or "-")
+end
+
+local tSkuCollisionProbeFrame
+local function tSkuCollisionProbeStart(aSeconds)
+	if Sku and Sku.debug then Sku.debug.log = true end   -- ensure samples persist to the ring
+
+	local tDuration = tonumber(aSeconds) or 8
+	if tDuration < 3 then tDuration = 3 elseif tDuration > 30 then tDuration = 30 end
+
+	local _, tInstType = IsInInstance()
+	local cur, run = GetUnitSpeed("player")
+	local pa, pb = tSkuFollowProbePos("player")   -- reuse the follow probe's UnitPosition helper
+
+	dprint("=== SkuCollisionProbe START ===")
+	dprint("instance", tostring(tInstType), "duration", tDuration,
+		"swimming", tostring(IsSwimming()), "falling", tostring(IsFalling()),
+		"onTaxi", tostring(UnitOnTaxi and UnitOnTaxi("player")),
+		"UnitPosition", (pa and "live" or "dead"))
+	dprint("speed@start current", tostring(cur), "run", tostring(run))
+
+	if SkuOptions and SkuOptions.Voice then
+		SkuOptions.Voice:OutputString("Kollisionsprobe. "..tDuration.." Sekunden. Jetzt gegen eine Wand laufen.", true, true, 0.2)
+	end
+
+	-- Sampler at the collision-loop cadence. Logs, each tick: current/run speed,
+	-- their ratio (the "fraction of max speed actually achieved" -- ~1 free, ~0
+	-- head-on wall, mid = sliding), IsFalling, the intent keys, and the outdoor
+	-- UnitPosition delta as a truth check on GetUnitSpeed.
+	tSkuCollisionProbeFrame = tSkuCollisionProbeFrame or CreateFrame("Frame")
+	local tElapsed, tAcc, tN = 0, 0, 0
+	local tLpa, tLpb = pa, pb
+	tSkuCollisionProbeFrame:SetScript("OnUpdate", function(self, time)
+		tElapsed = tElapsed + time
+		tAcc = tAcc + time
+		if tAcc < 0.15 then return end
+		tAcc = 0
+		tN = tN + 1
+		local ccur, crun = GetUnitSpeed("player")
+		local tRatio = (crun and crun > 0) and (ccur / crun) or nil
+		local tIntent, tKeys = tSkuCollisionProbeIntent()
+		local cpa, cpb = tSkuFollowProbePos("player")
+		local myDelta = (cpa and tLpa) and math.sqrt((cpa - tLpa)^2 + (cpb - tLpb)^2) or nil
+		dprint("sample", tN,
+			"cur", ccur and tostring(math.floor(ccur * 100) / 100) or "-",
+			"run", crun and tostring(math.floor(crun * 100) / 100) or "-",
+			"ratio", tRatio and tostring(math.floor(tRatio * 100) / 100) or "-",
+			"intent", tostring(tIntent), "keys", tKeys,
+			"falling", tostring(IsFalling()),
+			"posDelta", myDelta and tostring(math.floor(myDelta * 1000) / 1000) or "-")
+		tLpa, tLpb = cpa or tLpa, cpb or tLpb
+		if tElapsed >= tDuration then
+			self:SetScript("OnUpdate", nil)
+			dprint("=== SkuCollisionProbe END, samples="..tN.." ===")
+			if SkuOptions and SkuOptions.Voice then
+				SkuOptions.Voice:OutputString("Kollisionsprobe fertig, "..tN.." Samples", true, true, 0.2)
+			end
+		end
+	end)
+end
+
+SLASH_SKUCOLLISIONPROBE1 = "/skucollisionprobe"
+SLASH_SKUCOLLISIONPROBE2 = "/scp"
+SlashCmdList["SKUCOLLISIONPROBE"] = function(aMsg)
+	tSkuCollisionProbeStart(aMsg)
+end
+
+-- Load-time milestone capture. The single debugprofilestart() at the top of
+-- this file anchors the session clock, so Sku:MetricPoint() records seconds
+-- since core load. We stamp the two key startup events and auto-persist the
+-- timeline to the ring once the world is ready (silent - no chat spam).
+local tPerfLoadFrame = CreateFrame("Frame")
+tPerfLoadFrame.tFirstPew = true
+tPerfLoadFrame:RegisterEvent("ADDON_LOADED")
+tPerfLoadFrame:RegisterEvent("PLAYER_LOGIN")
+tPerfLoadFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+tPerfLoadFrame:SetScript("OnEvent", function(self, aEvent, aArg1)
+	if aEvent == "ADDON_LOADED" then
+		-- Fires once all of Sku's files have loaded+compiled+run their top-level
+		-- chunks. The gap from t0 (Core.lua load) to here is the file-load cost -
+		-- where the giant SkuDB data tables are paid.
+		if aArg1 == "Sku" and not self.tStampedSku then
+			self.tStampedSku = true
+			Sku:MetricPoint("ADDON_LOADED (Sku files compiled)")
+			pcall(Sku.PerfWrapLoginHandlers, Sku)
+		end
+	elseif aEvent == "PLAYER_LOGIN" then
+		Sku:MetricPoint("PLAYER_LOGIN")
+	elseif aEvent == "PLAYER_ENTERING_WORLD" then
+		if self.tFirstPew then
+			self.tFirstPew = false
+			Sku:MetricPoint("PLAYER_ENTERING_WORLD (first)")
+			-- Freeze the per-module timing now, before any later enable/disable
+			-- toggle can overwrite the load-time reading.
+			Sku.PerfModulesLoad = {}
+			for k, v in pairs(Sku.PerfModules) do
+				Sku.PerfModulesLoad[k] = {init = v.init, enableSelf = v.enableSelf, enableTotal = v.enableTotal}
+			end
+			-- [Load-perf 2026-07-05] Force a full GC now, while the loading screen
+			-- still covers us: file load and the route build leave hundreds of MB
+			-- of garbage, and letting the incremental GC digest that AFTER the
+			-- screen fades was part of the post-load stutter (same trick as
+			-- Questie's QuestieCleanup: collectgarbage at the end of init).
+			local tGcT0 = debugprofilestop()
+			local tGcBeforeKb = collectgarbage("count")
+			collectgarbage("collect")
+			Sku:MetricPoint(string.format("forced GC at PEW = %.0f ms, %.0f MB -> %.0f MB", debugprofilestop() - tGcT0, tGcBeforeKb / 1024, collectgarbage("count") / 1024))
+			-- One frame later control has returned to the user, so this stamp marks
+			-- roughly where the visible /reload freeze ends. Auto-persist the whole
+			-- load story to the ring (silent - no chat/TTS spam).
+			-- [Load-perf 2026-07-05] Do NOT write this capture into the ring:
+			-- chatty login diagnostics (the link-consistency phase used to log
+			-- one line per stale link, thousands per login) flood the ring and
+			-- the trim silently evicted the capture. Store it in a dedicated
+			-- eviction-proof field instead (same pattern as
+			-- SkuDebugLog.wpcResult): SkuDebugLog.loadPerf, overwritten each
+			-- load, read out-of-game via _readperf.py.
+			local function tCapture()
+				if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+				local tOut = { "=== load perf capture  " .. date("%Y-%m-%d %H:%M:%S") .. " ===" }
+				local function tEmit(aLine) tOut[#tOut + 1] = aLine end
+				Sku:PerformanceDumpLoad(tEmit)
+				Sku:PerformanceDumpFiles(tEmit)
+				Sku:PerformanceDumpModules(tEmit)
+				Sku:PerformanceDumpMem(tEmit)
+				if GetCVar and GetCVar("scriptProfile") == "1" then
+					Sku:PerformanceDumpAddons(tEmit, false)
+				end
+				SkuDebugLog.loadPerf = tOut
+			end
+			if C_Timer and C_Timer.After then
+				C_Timer.After(0, function()
+					Sku:MetricPoint("first frame after PEW")
+					tCapture()
+				end)
+			else
+				tCapture()
+			end
+			Sku:PerfStartLongFrameWatch()
+		end
+	end
+end)
+
+-- [Load-perf 2026-09-20] Post-load long-frame watch. The stopwatch addon can say
+-- THAT a 1.1 s frame happens ~3 s after PEW, but not what ran in it: its clock
+-- is not Sku's. This stamps every frame over 250 ms onto the MetricPoint
+-- timeline (same clock as the build milestones) together with how much of that
+-- frame the SkuDB stream used (Sku.perfStreamSlice, written by ChunkLoader), so
+-- a long frame reads as either "ours, and this label" or "not ours". After the
+-- watch window the whole timeline is stored a second time, eviction-proof, as
+-- SkuDebugLog.loadPerfLate - the first capture is taken at the first frame and
+-- cannot contain any of the post-load story (read with _readperf.py).
+local PERF_WATCH_SECONDS = 25
+local PERF_LONG_FRAME_MS = 250
+function Sku:PerfStartLongFrameWatch()
+	local tFrame = CreateFrame("Frame")
+	local tStart = debugprofilestop()
+	local tLast = tStart
+	tFrame:SetScript("OnUpdate", function(self)
+		local tNow = debugprofilestop()
+		local tGap = tNow - tLast
+		if tGap > PERF_LONG_FRAME_MS then
+			local tSlice = Sku.perfStreamSlice
+			local tOurs = ""
+			if tSlice and tSlice.at >= tLast and tSlice.at <= tNow then
+				tOurs = string.format(", skudb stream %.0f ms in it, longest step %.0f ms (%s)", tSlice.ms, tSlice.stepMs, tostring(tSlice.step))
+			end
+			Sku:MetricPoint(string.format("LONG FRAME %.0f ms%s", tGap, tOurs))
+		end
+		tLast = tNow
+		if tNow - tStart > PERF_WATCH_SECONDS * 1000 then
+			self:SetScript("OnUpdate", nil)
+			if type(SkuDebugLog) ~= "table" then SkuDebugLog = {} end
+			local tOut = { "=== late load perf capture  " .. date("%Y-%m-%d %H:%M:%S") .. " ===" }
+			Sku:PerformanceDumpLoad(function(aLine) tOut[#tOut + 1] = aLine end)
+			SkuDebugLog.loadPerfLate = tOut
+		end
+	end)
+end
+
+-- [Load-perf 2026-09-20] Per-module cost of the two login events. The AceAddon
+-- hooks above time OnInitialize/OnEnable, but a module's PLAYER_LOGIN and
+-- PLAYER_ENTERING_WORLD handlers ran unmeasured, and the gap between the PEW
+-- stamp and the first frame is ~1.6 s longer on a login with Sku than without.
+-- AceEvent resolves a method-name handler at CALL time (self[method]), so
+-- wrapping the methods once all files are loaded is enough. Only handlers over
+-- 20 ms are stamped.
+local PERF_TIMED_EVENTS = { "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD" }
+function Sku:PerfWrapLoginHandlers()
+	local tAce = LibStub and LibStub("AceAddon-3.0", true)
+	if not tAce then return end
+	for tName, tAddon in pairs(tAce.addons) do
+		if type(tName) == "string" and string.sub(tName, 1, 3) == "Sku" then
+			for _, tEvent in ipairs(PERF_TIMED_EVENTS) do
+				local tOrig = rawget(tAddon, tEvent)
+				if type(tOrig) == "function" then
+					tAddon[tEvent] = function(...)
+						local tT0 = debugprofilestop()
+						local tA, tB, tC = tOrig(...)
+						local tMs = debugprofilestop() - tT0
+						if tMs > 20 then
+							Sku:MetricPoint(string.format("%s handler of %s = %.0f ms", tEvent, tName, tMs))
+						end
+						return tA, tB, tC
+					end
+				end
+			end
+		end
+	end
+end
