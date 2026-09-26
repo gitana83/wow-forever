@@ -313,6 +313,17 @@ tZoneEventFrame:SetScript("OnEvent", function()
 	end
 end)
 
+-- WoW Forever/Camelot: GetUnitSpeed can return "secret" numbers that cannot be compared or divided
+-- (that threw in the walking-collision check and the pitch gauge). Returns the four speeds, or nils
+-- when they are hidden; callers fall back to a normal run speed.
+function SkuCoreUnitSpeed()
+	local a, b, c, d = GetUnitSpeed("player")
+	if _G.issecretvalue and (issecretvalue(a) or issecretvalue(b) or issecretvalue(c) or issecretvalue(d)) then
+		return nil, nil, nil, nil
+	end
+	return a, b, c, d
+end
+
 -- WoW Forever/Camelot: some child frames are "forbidden" objects for tainted code; calling a method
 -- on them throws and used to abort the whole window scan. Such frames are simply skipped.
 function SkuCoreSafeObjectType(aObj)
@@ -824,7 +835,7 @@ do
          tGaugeSamples[tGaugeIdx] = tHTick
       end
       tGaugeY, tGaugeX, tGaugeT = tPosY, tPosX, tNow
-      local tSpeed = GetUnitSpeed("player")
+      local tSpeed = SkuCoreUnitSpeed()
       if tGaugeSamples[4] and tSpeed and tSpeed > 1 then
          local tSum = tGaugeSamples[1] + tGaugeSamples[2] + tGaugeSamples[3] + tGaugeSamples[4]
          local tRatio = math.min((tSum / 4) / tSpeed, 1)
@@ -2056,7 +2067,8 @@ function SkuCore:OnEnable()
 							and (not SkuStatus or SkuStatus.follow == 0)
 						if SkuCoreMovement.Flags.MoveForward == true or SkuCoreMovement.Flags.StrafeLeft == true or SkuCoreMovement.Flags.StrafeRight == true or SkuCoreMovement.Flags.MoveBackward == true or SkuCoreMovement.Flags.AutoRun == true or tEngineWalkArm == true then
 							local _, tDistance = SkuCore:Distance(tNewX, tNewY, SkuCoreMovement.LastPosition.x, SkuCoreMovement.LastPosition.y)
-							local currentSpeed, runSpeed, flightSpeed, swimSpeed = GetUnitSpeed("player")
+							local currentSpeed, runSpeed, flightSpeed, swimSpeed = SkuCoreUnitSpeed()
+							if not currentSpeed then currentSpeed, runSpeed, swimSpeed = 7, 7, 4.72 end
 							local tMod = currentSpeed / 7
 
 							if IsSwimming() then
@@ -2179,7 +2191,7 @@ function SkuCore:OnEnable()
 							-- fallback mode (instances): positions are dead, so use the
 							-- LibRangeCheck lower bracket vs the keep-up baseline (refreshed
 							-- each moving tick) as a coarse "how far behind" proxy.
-							local moving = (GetUnitSpeed("player") or 0) > 0.5
+							local moving = (SkuCoreUnitSpeed() or 0) > 0.5
 							local tLibMin
 							if SkuOptions and SkuOptions.RangeCheck and SkuOptions.RangeCheck.GetRange then
 								local ok, a = pcall(function() return SkuOptions.RangeCheck:GetRange(tLeader) end)

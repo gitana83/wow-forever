@@ -1,4 +1,4 @@
-﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local MODULE_NAME = "SkuOptions"
@@ -4441,7 +4441,7 @@ function SkuOptions:OnInitialize()
 	SkuOptions.AceConfigDialog = LibStub("AceConfigDialog-3.0")
 	SkuOptions.AceConfigDialog:AddToBlizOptions("Sku")
 	-- WoW Forever/Camelot: the player name is not stable while the addon loads -- it
-	-- comes back as "Name", "Name Surname" (name + surname) or "Unbekannt"
+	-- comes back as "Name", "Name Nachname" (name + surname) or "Unbekannt"
 	-- (not known yet), and AceDB derives its character key ("<name> - <realm>") and
 	-- through it the profile AND the char-scoped settings from exactly that. Every
 	-- variant therefore got its own profile, which looked like "settings are not
@@ -4460,7 +4460,7 @@ function SkuOptions:OnInitialize()
 			tSv.stableCharName = tName:match("^(%S+)")
 		end
 		-- first run with this fix and the name not known yet: derive it from a
-		-- key that already exists ("Name - <realm>" / "Name Surname - <realm>")
+		-- key that already exists ("Name - <realm>" / "Name Nachname - <realm>")
 		if not tSv.stableCharName and type(tSv.profileKeys) == "table" then
 			local tSuffix = " - " .. tRealm
 			for tKey in pairs(tSv.profileKeys) do

@@ -396,6 +396,37 @@ local function tSetTooltipContainerItem(tooltip, bag, slot)
 	end
 end
 
+-- WoW Forever/Camelot: Blizzard's tooltip DATA api reads the item straight from the
+-- container slot (no tooltip frame, no item-cache round-trip), so it works where the
+-- scanning tooltip stays empty. Returns the joined lines or nil.
+local function tBagItemDataText(bag, slot)
+	local tInfo = _G.C_TooltipInfo
+	if not tInfo then return nil end
+	local tData
+	if tInfo.GetBagItem then
+		local tOk, tD = pcall(tInfo.GetBagItem, bag, slot)
+		if tOk then tData = tD end
+	end
+	if not tData and tInfo.GetItemByID and _G.GetContainerItemID then
+		local tId = GetContainerItemID(bag, slot)
+		if tId then
+			local tOk, tD = pcall(tInfo.GetItemByID, tId)
+			if tOk then tData = tD end
+		end
+	end
+	if type(tData) ~= "table" or type(tData.lines) ~= "table" then return nil end
+	local tOut = {}
+	for _, tLine in ipairs(tData.lines) do
+		local tLeft, tRight = tLine.leftText, tLine.rightText
+		if type(tLeft) == "string" and tLeft ~= "" and not string.find(tLeft, "Open Issue Report", 1, true) then
+			if type(tRight) == "string" and tRight ~= "" then tLeft = tLeft.." "..tRight end
+			tOut[#tOut + 1] = tLeft
+		end
+	end
+	if #tOut == 0 then return nil end
+	return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
+end
+
 local function getItemTooltipTextFromBagItem(bag, slot, itemId, button)
 	if button then
 		if button:GetScript("OnEnter") then
@@ -413,6 +444,10 @@ local function getItemTooltipTextFromBagItem(bag, slot, itemId, button)
 		end
 	else
 
+		if not itemId then
+			local tDataText = tBagItemDataText(bag, slot)
+			if tDataText then return tDataText, nil end
+		end
 		local tText, tPending = getItemTooltipTextHelper(function(tooltip)
 			if itemId then
 				tooltip:SetItemByID(itemId)
@@ -463,6 +498,29 @@ end
 ---@param invSlot InvSlot
 ---@return string|nil
 local function getEquippedItemTooltipText(invSlot)
+	-- WoW Forever/Camelot: the scanning tooltip has no SetInventoryItem (calling it
+	-- aborted the whole bag build as soon as an equippable item lay in a bag), so read
+	-- the equipped item from the tooltip DATA api first.
+	local tInfo = _G.C_TooltipInfo
+	if tInfo and tInfo.GetInventoryItem then
+		local tOk, tData = pcall(tInfo.GetInventoryItem, "player", invSlot)
+		if tOk and type(tData) == "table" and type(tData.lines) == "table" then
+			local tOut = {}
+			for _, tLine in ipairs(tData.lines) do
+				local tLeft, tRight = tLine.leftText, tLine.rightText
+				if type(tLeft) == "string" and tLeft ~= "" and not string.find(tLeft, "Open Issue Report", 1, true) then
+					if type(tRight) == "string" and tRight ~= "" then tLeft = tLeft.." "..tRight end
+					tOut[#tOut + 1] = tLeft
+				end
+			end
+			if #tOut > 0 then
+				return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
+			end
+		end
+		return nil
+	end
+	local tTip = SkuUtil:ResetScanningTooltip()
+	if not tTip or not tTip.SetInventoryItem then return nil end
 	return getItemTooltipTextHelper(function(tooltip)
 		tooltip:SetInventoryItem("player", invSlot)
 	end)
@@ -5207,11 +5265,13 @@ function SkuCore:QuestFrame(aParentChilds)
 				[132049] = L["Available Quest"],
 			}
 
+			local tGreetingQuestCount = 0
 			for x = 1, 10 do
 				local tFrameName = "QuestTitleButton"..x
 				if _G[tFrameName] then
 					if _G[tFrameName]:IsVisible() == true then
 						if _G[tFrameName]:GetText() then
+							tGreetingQuestCount = tGreetingQuestCount + 1
 							local tFriendlyName = SkuUtil:Unescape(_G[tFrameName]:GetText())
 							if _G["QuestTitleButton"..x.."QuestIcon"]:IsVisible() == true  then
 								tFriendlyName = (tIconStrings[_G["QuestTitleButton"..x.."QuestIcon"]:GetTextureFileID()] or "").." "..SkuUtil:Unescape(_G[tFrameName]:GetText())
@@ -5229,8 +5289,48 @@ function SkuCore:QuestFrame(aParentChilds)
 									childs = {},
 									func = _G[tFrameName]:GetScript("OnClick"),
 									click = true,
-								} 
+								}
 							end
+						end
+					end
+				end
+			end
+
+			-- WoW Forever/Camelot: Blizzard's quest greeting panel builds its titles as
+			-- pooled buttons without the global QuestTitleButtonN names, so the loop above
+			-- finds none. Read the list from the quest API instead (active quests first,
+			-- like Blizzard's own panel) and select through SelectActiveQuest/SelectAvailableQuest.
+			if tGreetingQuestCount == 0 then
+				local function tAddGreetingQuest(aLabel, aSelectFunc, aIndex)
+					local tFriendlyName = aLabel
+					table.insert(tGreetingChilds, tFriendlyName)
+					tGreetingChilds[tFriendlyName] = {
+						frameName = "QuestFrameGreetingPanel",
+						RoC = "Child",
+						type = "Button",
+						obj = _G["QuestFrameGreetingPanel"],
+						textFirstLine = tFriendlyName,
+						textFull = "",
+						childs = {},
+						func = function() aSelectFunc(aIndex) end,
+						click = true,
+					}
+				end
+				local tOkA, tNumActive = pcall(function() return GetNumActiveQuests() end)
+				if tOkA and type(tNumActive) == "number" and _G.GetActiveTitle and _G.SelectActiveQuest then
+					for i = 1, tNumActive do
+						local tOk, tTitle = pcall(GetActiveTitle, i)
+						if tOk and type(tTitle) == "string" and tTitle ~= "" then
+							tAddGreetingQuest(L["Accepted Quest"].." "..SkuUtil:Unescape(tTitle), SelectActiveQuest, i)
+						end
+					end
+				end
+				local tOkV, tNumAvail = pcall(function() return GetNumAvailableQuests() end)
+				if tOkV and type(tNumAvail) == "number" and _G.GetAvailableTitle and _G.SelectAvailableQuest then
+					for i = 1, tNumAvail do
+						local tOk, tTitle = pcall(GetAvailableTitle, i)
+						if tOk and type(tTitle) == "string" and tTitle ~= "" then
+							tAddGreetingQuest(L["Available Quest"].." "..SkuUtil:Unescape(tTitle), SelectAvailableQuest, i)
 						end
 					end
 				end

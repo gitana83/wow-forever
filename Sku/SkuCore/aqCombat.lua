@@ -708,6 +708,16 @@ local function aqCombatCreateControlFrame()
                         for q = 1, #tAllPartyRaidUnits do
                            local tPartyUnitToTest = tAllPartyRaidUnits[q]
                            local isTanking, status, scaledPercentage, rawPercentage, threatValue = UnitDetailedThreatSituation(tPartyUnitToTest, tTargetUnitIdToTest)
+                           -- WoW Forever/Camelot: in combat these come back as "secret" values that
+                           -- cannot be compared (that threw hundreds of errors per fight). Only the
+                           -- fact "this unit has a threat entry" survives; the numbers and the
+                           -- tanking flag are dropped, so the aggro-switch and threat-percentage
+                           -- warnings simply stay silent instead of erroring.
+                           if _G.issecretvalue and (issecretvalue(isTanking) or issecretvalue(status) or issecretvalue(scaledPercentage) or issecretvalue(rawPercentage) or issecretvalue(threatValue)) then
+                              local tHasOk, tHas = pcall(function() return status and true or false end)
+                              status = (tHasOk and tHas) or nil
+                              isTanking, scaledPercentage, rawPercentage, threatValue = nil, nil, nil, nil
+                           end
                            if status then
                               local tPartyGuid = UnitGUID(tPartyUnitToTest)
                               -- Hostility is asked at the admission point only, so
@@ -1806,7 +1816,8 @@ function aqCombat:aqCombat_SKU_UNIT_DIED(aEvent, aUnitGUID, aUnitName)
                   SkuCoreAqCombatOutput(tSetting.voiceOutput, {unit1 = tCreateUnitId,}, {wait = true, overwrite = false, instant = true, doNotOverwrite = true}, tSetting)
                elseif tCurrentSettings.combat.hostile.outputDeadUnits.value == 3 then
                   if SkuCore.threatTable[aUnitGUID] and SkuCore.threatTable[aUnitGUID][UnitGUID("player")] then
-                     if SkuCore.threatTable[aUnitGUID][UnitGUID("player")].scaledPercentage >= 100 then
+                     -- scaledPercentage is nil where Forever hides the threat numbers
+                     if (SkuCore.threatTable[aUnitGUID][UnitGUID("player")].scaledPercentage or 0) >= 100 then
                         local tSetting = tCurrentSettings.combat.hostile.outputDeadUnits
                         SkuCoreAqCombatOutput(tSetting.voiceOutput, {unit1 = tCreateUnitId,}, {wait = true, overwrite = false, instant = true, doNotOverwrite = true}, tSetting)
                      end

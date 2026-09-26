@@ -614,6 +614,31 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 	-- -- no rendered QuestLogFrame/tooltip scraping needed at all. Every call
 	-- individually pcall'd: one function behaving unexpectedly must not blank
 	-- the whole rewards section.
+	-- Full item tooltip (stats, armor, slot, requirements) for a reward, read from Blizzard's tooltip
+	-- data api: the scanning tooltip cannot take a hyperlink on WoW Forever. One section per item, so
+	-- CTRL-SHIFT-UP/DOWN steps from item to item and SHIFT-UP/DOWN reads its lines.
+	local tItemSections = {}
+	local function tAddItemSection(aLabel, aLink, aName)
+		if type(aLink) ~= "string" or not (_G.C_TooltipInfo and _G.C_TooltipInfo.GetHyperlink) then return end
+		local tBare = string.match(aLink, "|H(item:[^|]+)|h") or string.match(aLink, "(item:[%d:%-]+)") or aLink
+		local tOk, tData = pcall(_G.C_TooltipInfo.GetHyperlink, tBare)
+		if not (tOk and type(tData) == "table" and type(tData.lines) == "table") then return end
+		local tOut = {}
+		for _, tLine in ipairs(tData.lines) do
+			local tLeft, tRight = tLine.leftText, tLine.rightText
+			if type(tLeft) == "string" and tLeft ~= "" and not string.find(tLeft, "Open Issue Report", 1, true) then
+				if type(tRight) == "string" and tRight ~= "" then tLeft = tLeft.." "..tRight end
+				tOut[#tOut + 1] = tLeft
+			end
+		end
+		if #tOut > 0 then
+			-- first line is the item name; the label carries it already
+			if aName and tOut[1] == aName then table.remove(tOut, 1) end
+			tItemSections[#tItemSections + 1] = aLabel.."\r\n"..table.concat(tOut, "\r\n")
+			return true
+		end
+	end
+
 	local tRewardLines = {}
 	local tOkMoney, tMoney = pcall(GetQuestLogRewardMoney, questID)
 	if tOkMoney and tMoney and tMoney > 0 then
@@ -625,7 +650,15 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 		for i = 1, tNumRew do
 			local tOkRi, tName, tTex, tNumItems = pcall(GetQuestLogRewardInfo, i, questID)
 			if tOkRi and tName then
-				table.insert(tRewardLines, (tNumItems and tNumItems > 1) and (tName.." x"..tNumItems) or tName)
+				-- an item that got its own tooltip section is not repeated in this summary
+				local tHasSection = false
+				if _G.GetQuestLogItemLink then
+					local tOkL, tL = pcall(GetQuestLogItemLink, "reward", i, questID)
+					if tOkL then tHasSection = tAddItemSection(Sku.deEn("Belohnung", "Reward", "Récompense")..": "..tName, tL, tName) == true end
+				end
+				if not tHasSection then
+					table.insert(tRewardLines, (tNumItems and tNumItems > 1) and (tName.." x"..tNumItems) or tName)
+				end
 			end
 		end
 	end
@@ -637,7 +670,9 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 		if tOk2 and tNum2 and tNum2 > 0 then tOkNumCh, tNumCh = true, tNum2 end
 	end
 	if tOkNumCh and tNumCh and tNumCh > 0 then
-		table.insert(tRewardLines, L["Auswahl:"])
+		-- choices that got their own tooltip section are not repeated here; the "Auswahl:" heading
+		-- only appears when at least one choice had no tooltip and is listed by name
+		local tChoiceLines = {}
 		for i = 1, tNumCh do
 			local tOkCi, tName, tTex, tNumItems = pcall(GetQuestLogChoiceInfo, i, questID)
 			-- item not cached yet: the name comes back empty, so take it from the item link
@@ -664,13 +699,25 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 						if #tExtra > 0 then tText = tText.." ("..table.concat(tExtra, ", ")..")" end
 					end
 				end
-				table.insert(tRewardLines, tText)
+				if tAddItemSection(L["Auswahl:"]..": "..tName, tLink, tName) ~= true then
+					table.insert(tChoiceLines, tText)
+				end
+			end
+		end
+		if #tChoiceLines > 0 then
+			table.insert(tRewardLines, L["Auswahl:"])
+			for _, tChoiceLine in ipairs(tChoiceLines) do
+				table.insert(tRewardLines, tChoiceLine)
 			end
 		end
 	end
 	dprint("SkuQuest GetTTSText diag rewards", questID, tOkMoney, tMoney, tOkNumRew, tNumRew, tOkNumCh, tNumCh, #tRewardLines)
 	if #tRewardLines > 0 then
 		table.insert(tSections, L["Belohnungen\r\n"]..table.concat(tRewardLines, "\r\n"))
+	end
+	-- the item tooltips, one section each, right after the summary
+	for _, tItemSection in ipairs(tItemSections) do
+		table.insert(tSections, tItemSection)
 	end
 
 	dprint("SkuQuest GetTTSText diag total sections", questID, #tSections)

@@ -45,6 +45,7 @@ SkuMob.options = {
 			desc = "",
 			type = "toggle",
 		},
+muteTargetHealthAtTarget = {			name = Sku.deEn("Blizzard-Ansage der Ziel-Gesundheit erst ab dem ersten Schaden (nicht die 100 Prozent beim Anvisieren)", "Blizzard target health call-out only after the first damage (not the 100 percent on targeting)", "Annonce Blizzard de la vie de la cible seulement apres les premiers degats"),			order = 8,			desc = "",			type = "toggle",		},
 		InCombatSound={
 			name = L["Sound if target is in combat"],
 			order = 7,
@@ -63,6 +64,7 @@ SkuMob.defaults = {
 	vocalizePlayerNamePlaceholdersSkuTts = false,
 	repeatRaidTargetMarkers = true,
 	autoSetSkuRaidTargetsToInCombatCreatures = false,
+	muteTargetHealthAtTarget = true,
 	InCombatSound = "Interface\\AddOns\\Sku\\SkuMob\\assets\\Target_in_combat_low.mp3",	
 }
 
@@ -78,6 +80,7 @@ SkuSettings:Register("SkuMob", {
 	["vocalizePlayerNamePlaceholdersSkuTts"]       = { scope = "profile", default = false, type = "boolean" },
 	["repeatRaidTargetMarkers"]                    = { scope = "profile", default = true,  type = "boolean" },
 	["autoSetSkuRaidTargetsToInCombatCreatures"]   = { scope = "profile", default = false, type = "boolean" },
+	["muteTargetHealthAtTarget"]                   = { scope = "profile", default = true,  type = "boolean" },
 	["InCombatSound"]                              = { scope = "profile", default = "Interface\\AddOns\\Sku\\SkuMob\\assets\\Target_in_combat_low.mp3", type = "string" },
 	["enemyCombatStatusMode"]                      = { scope = "profile", default = "beep", type = "string" },
 })

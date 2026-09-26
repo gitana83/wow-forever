@@ -369,6 +369,14 @@ end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local tLastSoftEnemyGuid
+-- Time of the last real hard-target change. Changing to a non-attackable target (e.g.
+-- yourself) makes Sku relax SoftTargetWithLocked, so the client immediately reports a soft
+-- friend/interact unit (a nearby NPC) and its name was spoken LAST, sounding like the
+-- new target. Soft announcements are held back briefly after a hard target change.
+local tLastHardTargetChange = 0
+local function tSoftAnnounceHeld()
+	return UnitExists("target") and (GetTime() - tLastHardTargetChange) < 1.0
+end
 function SkuMob:PLAYER_SOFT_ENEMY_CHANGED(arg1, arg2, arg3)
 	tSoftTrace("enemy", "softenemy", arg2, arg3)
 	if not UnitGUID("softenemy") then
@@ -412,6 +420,9 @@ function SkuMob:PLAYER_SOFT_FRIEND_CHANGED(aEvent, aGuid, aNewGuid)
 	if not UnitGUID("softfriend") then
 		return
 	end
+	if tSoftAnnounceHeld() then
+		return
+	end
 
 	if UnitGUID("softfriend") ~= UnitGUID("target") then
 		if SkuOptions.db.profile["SkuOptions"].softTargeting.friend.forPlayers == false and (UnitIsPlayer("softfriend") == true and UnitIsFriend("player", "softfriend") == true) then
@@ -432,6 +443,9 @@ end
 function SkuMob:PLAYER_SOFT_INTERACT_CHANGED(aEvent, aGuid, aNewGuid)
 	tSoftTrace("interact", "softinteract", aGuid, aNewGuid)
 	if not UnitGUID("softinteract") then
+		return
+	end
+	if tSoftAnnounceHeld() then
 		return
 	end
 
@@ -488,7 +502,109 @@ function SkuMob:PLAYER_SOFT_INTERACT_CHANGED(aEvent, aGuid, aNewGuid)
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+-- Blizzard's combat audio announcer ("Audiohinweise für Kämpfe") speaks the target's health in steps
+-- ("Alle 30%") and always opens with 100% when a target is selected. There is no "start below X"
+-- setting for the target, so this switches the target-health announcement OFF while the target is
+-- selected and turns it back ON as soon as the target's health changes (it took damage), so the first
+-- call-out is the first real one. Switchable in the Monitor -> Ziel Optionen menu.
+-- Safety: the original value is kept in the saved variables and restored on target loss, after 10 s at
+-- most, on logout and at the next login -- the player's own setting is never left at "off".
+local CAA_TARGET_HEALTH = "CAATargetHealthPercent"
+local tTargetHealthMuted = false
+local tTargetHealthMuteToken = 0
+
+local function tGetCaaSetting()
+	if _G.C_CVar and _G.C_CVar.GetCVar then
+		local tOk, tV = pcall(_G.C_CVar.GetCVar, CAA_TARGET_HEALTH)
+		if tOk and tV ~= nil then return tonumber(tV) end
+	end
+	if _G.Settings and _G.Settings.GetSetting then
+		local tOk, tS = pcall(_G.Settings.GetSetting, CAA_TARGET_HEALTH)
+		if tOk and tS then
+			local tOk2, tV = pcall(tS.GetValue, tS)
+			if tOk2 then return tonumber(tV) end
+		end
+	end
+	return nil
+end
+
+local function tSetCaaSetting(aValue)
+	local tDone = false
+	if _G.C_CVar and _G.C_CVar.SetCVar then
+		local tOk = pcall(_G.C_CVar.SetCVar, CAA_TARGET_HEALTH, aValue)
+		tDone = tOk and tonumber(_G.C_CVar.GetCVar(CAA_TARGET_HEALTH)) == aValue
+	end
+	if not tDone and _G.Settings and _G.Settings.GetSetting then
+		local tOk, tS = pcall(_G.Settings.GetSetting, CAA_TARGET_HEALTH)
+		if tOk and tS then pcall(tS.SetValue, tS, aValue, true) end
+	end
+end
+
+local function tRestoreTargetHealth()
+	local tSaved = SkuOptions and SkuOptions.db and SkuOptions.db.global
+	local tOrig = tSaved and tSaved.skuMobTargetHealthOrig
+	if tOrig ~= nil then
+		tSetCaaSetting(tOrig)
+		tSaved.skuMobTargetHealthOrig = nil
+	end
+	tTargetHealthMuted = false
+	tTargetHealthMuteToken = tTargetHealthMuteToken + 1
+end
+
+function SkuMob:MuteTargetHealthAtTarget(aUnitId)
+	if aUnitId ~= nil and aUnitId ~= "target" then return end
+	if not (SkuSettings and SkuSettings:Sub("SkuMob").muteTargetHealthAtTarget == true) then
+		if tTargetHealthMuted then tRestoreTargetHealth() end
+		return
+	end
+	if not UnitExists("target") or UnitIsDead("target") then
+		if tTargetHealthMuted then tRestoreTargetHealth() end
+		return
+	end
+	if tTargetHealthMuted then
+		-- new target while still muted: stay muted, restart the safety timer
+		tTargetHealthMuteToken = tTargetHealthMuteToken + 1
+	else
+		local tCurrent = tGetCaaSetting()
+		if not tCurrent or tCurrent == 0 then return end   -- nothing announced anyway
+		SkuOptions.db.global.skuMobTargetHealthOrig = tCurrent
+		tSetCaaSetting(0)
+		tTargetHealthMuted = true
+	end
+	local tToken = tTargetHealthMuteToken
+	C_Timer.After(10, function()
+		if tTargetHealthMuted and tToken == tTargetHealthMuteToken then tRestoreTargetHealth() end
+	end)
+end
+
+do
+	local tFrame = CreateFrame("Frame")
+	tFrame:RegisterUnitEvent("UNIT_HEALTH", "target")
+	tFrame:RegisterEvent("PLAYER_LOGOUT")
+	tFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+	tFrame:SetScript("OnEvent", function(_, aEvent)
+		if aEvent == "UNIT_HEALTH" then
+			if tTargetHealthMuted then tRestoreTargetHealth() end
+		elseif aEvent == "PLAYER_LOGOUT" then
+			if tTargetHealthMuted then tRestoreTargetHealth() end
+		elseif aEvent == "PLAYER_ENTERING_WORLD" then
+			-- a value left over from a crash / forced close: put the player's setting back
+			C_Timer.After(3, function()
+				local tSaved = SkuOptions and SkuOptions.db and SkuOptions.db.global
+				if tSaved and tSaved.skuMobTargetHealthOrig ~= nil and not tTargetHealthMuted then
+					tRestoreTargetHealth()
+				end
+			end)
+		end
+	end)
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
 function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
+	if aUnitId == nil or aUnitId == "target" then
+		tLastHardTargetChange = GetTime()
+	end
+	SkuMob:MuteTargetHealthAtTarget(aUnitId)
 	C_Timer.After(0.01, function() --this delay is to provide the combat monitor an option to first send output to the tts queue
 
 		aUnitId = aUnitId or "target"
