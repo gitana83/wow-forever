@@ -1,4 +1,4 @@
-﻿---@diagnostic disable: undefined-doc-name
+---@diagnostic disable: undefined-doc-name
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 --/script skudebuglevel = 0
@@ -9,6 +9,28 @@ local _G = _G
 local L = Sku.L
 
 local tStartDebugTimestamp = GetTime() or 0
+
+-- Refreshes the classic action-bar globals/APIs after login/menu-close (three call
+-- sites below, previously each with its own copy-pasted, slightly diverging set of
+-- "if not Sku.isForever" gates). On WoW Forever/Camelot these calls/writes taint
+-- Blizzard's own action bar / EditMode code (ADDON_ACTION_FORBIDDEN, secret
+-- SetCooldown), so the whole refresh is skipped there. aSetShowVars matches
+-- whichever call site previously had the SHOW_MULTI_ACTIONBAR_1..4 lines active.
+local function SkuCoreRefreshActionBarGlobals(aSetShowVars)
+	if Sku.isForever then return end
+	TRAINER_FILTER_AVAILABLE = 1
+	TRAINER_FILTER_UNAVAILABLE = 0
+	TRAINER_FILTER_USED = 0
+	SetActionBarToggles(1,1,1,1,1)
+	if aSetShowVars then
+		SHOW_MULTI_ACTIONBAR_1 = 1
+		SHOW_MULTI_ACTIONBAR_2 = 1
+		SHOW_MULTI_ACTIONBAR_3 = 1
+		SHOW_MULTI_ACTIONBAR_4 = 1
+	end
+	if MultiActionBar_Update then MultiActionBar_Update() end
+	if UIParent_ManageFramePositions then UIParent_ManageFramePositions() end
+end
 
 SkuCoreDB = {}
 SkuCore = LibStub("AceAddon-3.0"):NewAddon("SkuCore", "AceConsole-3.0", "AceEvent-3.0")
@@ -1775,8 +1797,10 @@ function SkuCore:OnEnable()
 		if SkuCore:PlayerIsHunter()
 			and SkuSettings:Sub("SkuCore").classes.hunter.petHappyness == true
 			-- make sure player isn't dead and pet exists
-			and UnitHealth("player") ~= 0
-			and UnitHealth("pet") ~= 0
+			-- WoW Forever: UnitHealth can be a "secret" number, and comparing it threw an
+			-- error every frame (1644x, then "too many Lua errors"). The dead checks need no number.
+			and not UnitIsDeadOrGhost("player")
+			and UnitExists("pet") and not UnitIsDead("pet")
 		then
 			SkuCoreOldPetHappinessCounter = SkuCoreOldPetHappinessCounter + time
 			if SkuCoreOldPetHappinessCounter > 2 then
@@ -3362,18 +3386,7 @@ function SkuCore:PLAYER_ENTERING_WORLD(...)
 
 			C_Timer.After(15, function()
 				if InCombatLockdown() ~= true then
-					TRAINER_FILTER_AVAILABLE = 1 
-					TRAINER_FILTER_UNAVAILABLE = 0 
-					TRAINER_FILTER_USED = 0
-					SetActionBarToggles(1,1,1,1,1) 
-					--[[
-					SHOW_MULTI_ACTIONBAR_1 = 1 
-					SHOW_MULTI_ACTIONBAR_2 = 1 
-					SHOW_MULTI_ACTIONBAR_3 = 1 
-					SHOW_MULTI_ACTIONBAR_4 = 1 
-					]]
-					MultiActionBar_Update() 
-					UIParent_ManageFramePositions() 
+					SkuCoreRefreshActionBarGlobals(false)
 
 					C_CVar.SetCVar("instantQuestText", "1")
 					C_CVar.SetCVar("autoLootDefault", "1")
@@ -3426,19 +3439,7 @@ function SkuCore:PLAYER_ENTERING_WORLD(...)
 			
 			C_Timer.After(10, function()
 				if InCombatLockdown() ~= true then
-					TRAINER_FILTER_AVAILABLE = 1 
-					TRAINER_FILTER_UNAVAILABLE = 0 
-					TRAINER_FILTER_USED = 0
-					SetActionBarToggles(1,1,1,1,1) 
-					
-					
-					SHOW_MULTI_ACTIONBAR_1 = 1 
-					SHOW_MULTI_ACTIONBAR_2 = 1 
-					SHOW_MULTI_ACTIONBAR_3 = 1 
-					SHOW_MULTI_ACTIONBAR_4 = 1 
-					
-					MultiActionBar_Update() 
-					UIParent_ManageFramePositions() 
+					SkuCoreRefreshActionBarGlobals(true)
 					C_CVar.SetCVar("instantQuestText", "1")
 					C_CVar.SetCVar("autoLootDefault", "1")
 					C_CVar.SetCVar("alwaysShowActionBars", "1")
@@ -3568,21 +3569,7 @@ function SkuCore:PLAYER_ENTERING_WORLD(...)
 
 	C_Timer.After(6, function()
 		if InCombatLockdown() ~= true then
-			TRAINER_FILTER_AVAILABLE = 1 
-			TRAINER_FILTER_UNAVAILABLE = 0 
-			TRAINER_FILTER_USED = 0
-			SetActionBarToggles(1,1,1,1,1) 
-			
-			--[[
-			SHOW_MULTI_ACTIONBAR_1 = 1 
-			SHOW_MULTI_ACTIONBAR_2 = 1 
-			SHOW_MULTI_ACTIONBAR_3 = 1 
-			SHOW_MULTI_ACTIONBAR_4 = 1 
-			]]
-			-- Neither exists on every client (WoW Forever/Camelot restructured
-			-- action bars via Edit Mode); both are just UI layout refreshes.
-			if MultiActionBar_Update then MultiActionBar_Update() end
-			if UIParent_ManageFramePositions then UIParent_ManageFramePositions() end
+			SkuCoreRefreshActionBarGlobals(false)
 			C_CVar.SetCVar("instantQuestText", "1")
 			C_CVar.SetCVar("autoLootDefault", "1")
 			C_CVar.SetCVar("alwaysShowActionBars", "1")

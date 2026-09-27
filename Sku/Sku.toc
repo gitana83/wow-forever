@@ -1,4 +1,4 @@
-﻿## Interface: 20506, 11509
+﻿## Interface: 20506, 11509, 16001
 ## Title: Sku v43.8
 ## SavedVariables: SkuOptionsDB, SkuTranslatedData, SkuErrorLog, SkuDebugLog
 ## Version: 43.8
@@ -65,11 +65,12 @@ SkuCore\friends.lua
 # SkuCore\lfg.lua  -- entfernt: Dungeon-Browser-Modul wird neu aufgebaut
 SkuCore\voiceOutput.lua
 SkuCore\mail.lua
-# SkuCore\aq.lua -- entfernt fuer WoW Forever/Camelot: der Lebens- und
-# Energiemonitor rechnet mit UnitHealth/UnitPower, die auf diesem Client als
-# "geheime" Werte kommen (keine Arithmetik/Vergleiche durch Addons moeglich).
-# aqCombat.lua bleibt, da es keine UnitHealth/UnitPower-Aufrufe enthaelt
-# (Gegnerfarben/Raid-Marker + Kampfmenue sind davon nicht betroffen).
+# SkuCore\aq.lua -- der Lebens- und Energiemonitor. Auf WoW Forever/Camelot rechnet er
+# mit UnitHealth/UnitPower, die dort als "geheime" Werte kommen (keine Arithmetik/
+# Vergleiche durch Addons moeglich) - deshalb bleibt er auf DIESEM Client per
+# Sku.isForever abgeschaltet (siehe aq.lua:OnEnable). Auf jedem anderen Client
+# (Era/TBC/Wrath/Anniversary) laeuft er normal weiter.
+SkuCore\aq.lua
 SkuCore\aqCombat.lua
 SkuCore\DialTargeting.lua
 SkuCore\dialogkey.lua

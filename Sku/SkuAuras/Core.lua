@@ -2374,9 +2374,107 @@ function SkuAuras:InvalidateAuraListCache(aUnit, aFilter)
 	end
 end
 
+---------------------------------------------------------------------------------------------------------------------------------------
+-- WoW Forever/Camelot: addons may not register COMBAT_LOG_EVENT_UNFILTERED there, so the
+-- SPELL_AURA_APPLIED / _REFRESH / _REMOVED events that auras are built on never arrive.
+-- They are rebuilt here from UNIT_AURA for the two units auras watch (player, target):
+-- keep a snapshot of the unit's auras by auraInstanceID, diff it on every UNIT_AURA and
+-- feed the differences into the normal evaluation as synthetic combat-log events (same
+-- payload layout as a real one). Values the client marks "secret" are skipped.
+local tAuraSnap = {}
+
+local function tAuraSnapScan(aUnit)
+	if not (_G.C_UnitAuras and C_UnitAuras.GetAuraDataByIndex) then
+		return nil
+	end
+	local tNew = {}
+	local tOk = pcall(function()
+		for f = 1, 2 do
+			local tFilter = (f == 1) and "HELPFUL" or "HARMFUL"
+			for x = 1, 80 do
+				local d = C_UnitAuras.GetAuraDataByIndex(aUnit, x, tFilter)
+				if not d then break end
+				local tId, tSpellId, tName, tSrc, tExp = d.auraInstanceID, d.spellId, d.name, d.sourceUnit, d.expirationTime
+				if _G.issecretvalue and (issecretvalue(tId) or issecretvalue(tSpellId) or issecretvalue(tName)) then
+					tId = nil
+				end
+				if tId then
+					if _G.issecretvalue and issecretvalue(tSrc) then tSrc = nil end
+					if _G.issecretvalue and issecretvalue(tExp) then tExp = nil end
+					tNew[tId] = {
+						spellId = tSpellId,
+						name = tName,
+						srcGuid = tSrc and UnitGUID(tSrc) or nil,
+						srcName = tSrc and UnitName(tSrc) or nil,
+						helpful = (tFilter == "HELPFUL"),
+						exp = tExp,
+					}
+				end
+			end
+		end
+	end)
+	if not tOk then
+		return nil
+	end
+	return tNew
+end
+
+local function tAuraSnapEmit(aUnit, aSubevent, aData)
+	SkuAuras:COMBAT_LOG_EVENT_UNFILTERED("customCLEU", {
+		GetTime(),
+		aSubevent,
+		false,
+		aData.srcGuid,
+		aData.srcName,
+		nil,
+		nil,
+		UnitGUID(aUnit),
+		UnitName(aUnit),
+		nil,
+		nil,
+		aData.spellId,
+		aData.name,
+		1,
+		aData.helpful and "BUFF" or "DEBUFF",
+	})
+end
+
+-- Silent (re)sync, no events: used when the unit itself changed (new target).
+function SkuAuras:ResyncForeverAuraSnapshot(aUnit)
+	tAuraSnap[aUnit] = tAuraSnapScan(aUnit)
+end
+
+function SkuAuras:ForeverAuraEvents(aUnit)
+	local tPrev = tAuraSnap[aUnit]
+	local tNew = tAuraSnapScan(aUnit)
+	if not tNew then
+		return
+	end
+	tAuraSnap[aUnit] = tNew
+	if not tPrev then
+		return
+	end
+	for tId, tData in pairs(tPrev) do
+		if not tNew[tId] then
+			tAuraSnapEmit(aUnit, "SPELL_AURA_REMOVED", tData)
+		end
+	end
+	for tId, tData in pairs(tNew) do
+		local tOld = tPrev[tId]
+		if not tOld then
+			tAuraSnapEmit(aUnit, "SPELL_AURA_APPLIED", tData)
+		elseif tData.exp and tOld.exp and tData.exp > tOld.exp + 0.5 then
+			tAuraSnapEmit(aUnit, "SPELL_AURA_REFRESH", tData)
+		end
+	end
+end
+
 function SkuAuras:UNIT_AURA(aEvent, aUnit)
 	if aUnit == "player" or aUnit == "target" then
 		SkuAuras:InvalidateAuraListCache(aUnit)
+		if Sku and Sku.isForever then
+			SkuAuras:ForeverAuraEvents(aUnit)
+		end
 		-- [v43.0] Also mark for the membership diff (see tAuraMembershipDirty).
 		tAuraMembershipDirty[aUnit] = true
 		tAuraMembershipDirtyPending = true
@@ -2385,6 +2483,9 @@ end
 
 function SkuAuras:PLAYER_TARGET_CHANGED()
 	SkuAuras:InvalidateAuraListCache("target")
+	if Sku and Sku.isForever then
+		SkuAuras:ResyncForeverAuraSnapshot("target")
+	end
 	-- [v43.0] Publish the change on the next frame instead of up to 250 ms later.
 	SkuAuras:MarkUnitDirty("player")
 	SkuAuras:MarkUnitDirty("target")

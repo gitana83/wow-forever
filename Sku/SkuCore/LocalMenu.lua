@@ -6343,7 +6343,7 @@ SlashCmdList["SKUCHECK"] = function(aParam)
 	end
 	-- power: the configured resource of the health & power monitor must resolve
 	-- to something the client can read (SkuCore/aq.lua, Aq.SkuCheck).
-	if (tDomain == "" or tDomain == "power") and SkuCore.Aq and SkuCore.Aq.SkuCheck then
+	if (tDomain == "" or tDomain == "power") and SkuCore.Aq and SkuCore.Aq.SkuCheck and not (Sku and Sku.isForever) then
 		local c, p, v = SkuCore.Aq.SkuCheck()
 		dprint("skucheck", "power done:", c, "monitor checks,", p, "pending,", v, "violations")
 		tChecked, tPending, tViolations = tChecked + c, tPending + (p or 0), tViolations + v
@@ -6596,19 +6596,3 @@ function SkuCore:Build_MerchantFrame(aParentChilds)
 		end
 	end
 end
-
--- PROBE (temporary): what happens when an item is sold at a vendor.
-pcall(function()
-	if _G.C_Container and _G.C_Container.UseContainerItem then
-		hooksecurefunc(_G.C_Container, "UseContainerItem", function(aBag, aSlot)
-			dprint("sellDiag", "UseContainerItem", tostring(aBag), tostring(aSlot), "merchantVisible", tostring(_G.MerchantFrame and _G.MerchantFrame:IsVisible()))
-		end)
-	end
-	local tF = CreateFrame("Frame")
-	for _, tEv in ipairs({"MERCHANT_SHOW", "MERCHANT_CLOSED", "MERCHANT_UPDATE", "BAG_UPDATE_DELAYED", "PLAYER_MONEY"}) do
-		pcall(tF.RegisterEvent, tF, tEv)
-	end
-	tF:SetScript("OnEvent", function(_, aEvent)
-		dprint("sellDiag", "event", aEvent, "merchantVisible", tostring(_G.MerchantFrame and _G.MerchantFrame:IsVisible()))
-	end)
-end)

@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local MODULE_NAME = "SkuOptions"
@@ -297,7 +297,7 @@ function SkuOptions:SlashFunc(input, aSilent)
 		end
 
 
-		if fields[1] == "mon" and SkuCore.Aq then
+		if fields[1] == "mon" and SkuCore.Aq and not (Sku and Sku.isForever) then
 			SkuCore.Aq:AqSlashHandler(fields)
 		end
 
@@ -630,8 +630,10 @@ function SkuOptions:OnProfileReset()
 	SkuOptions:SkuKeyBindsResetBindings()
 	SkuOptions:SkuKeyBindsUpdate(true)
 	SkuCore.GameWorldObjects:GameWorldObjectsOnLogin()
-	-- Aq (health/resource monitor) removed for WoW Forever/Camelot, see Sku.toc.
-	if SkuCore.Aq then SkuCore.Aq:AqOnLogin() end
+	-- Aq (health/resource monitor): permanently off on WoW Forever/Camelot, UnitHealth/
+	-- UnitPower are secret values there and the module's own OnEnable already no-ops
+	-- (SkuCore/aq.lua). Calling AqOnLogin directly here bypasses that guard, so repeat it.
+	if SkuCore.Aq and not (Sku and Sku.isForever) then SkuCore.Aq:AqOnLogin() end
 	SkuCore.DamageMeter:DamageMeterOnLogin()
 	
   	if SkuCore then pcall(function() SkuCore:OnEnable() end) end

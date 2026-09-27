@@ -1,4 +1,4 @@
-﻿---@diagnostic disable: undefined-global
+---@diagnostic disable: undefined-global
 local MODULE_NAME = "SkuQuest"
 local _G = _G
 
@@ -353,8 +353,24 @@ end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuQuest:OnSkuQuestAbandon()
-	SetAbandonQuest() --Sets the currently selected quest to be abandoned.
-	AbandonQuest()
+	-- WoW Forever/Camelot: the global SetAbandonQuest/AbandonQuest are gone (calling them
+	-- threw "attempt to call a nil value" and nothing was abandoned); they live in
+	-- C_QuestLog now. Both act on the SELECTED quest, which the quest menu sets when its
+	-- entry is highlighted (GetTTSText -> C_QuestLog.SetSelectedQuest).
+	local tOk, tErr = pcall(function()
+		if _G.SetAbandonQuest and _G.AbandonQuest then
+			SetAbandonQuest() --Sets the currently selected quest to be abandoned.
+			AbandonQuest()
+		elseif C_QuestLog and C_QuestLog.SetAbandonQuest and C_QuestLog.AbandonQuest then
+			C_QuestLog.SetAbandonQuest()
+			C_QuestLog.AbandonQuest()
+		else
+			error("no abandon quest function available")
+		end
+	end)
+	if not tOk then
+		dprint("SkuQuest OnSkuQuestAbandon failed", tostring(tErr))
+	end
 	--SkuQuest:ToggleQuestLogHook()
 	HideUIPanel(QuestLogFrame)
 	--SkuOptions.TTS:Output("", -1)

@@ -2985,14 +2985,23 @@ function aqCombat:aqCombatMenuBuilder()
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
--- Monitor menu (root entry "Monitor"). The health/resource/party monitors that used to live
--- here (aq.lua) cannot work on WoW Forever/Camelot -- UnitHealth/UnitPower are "secret"
--- values there -- so they are gone. What stays are the parts that need no secret values:
--- the combat monitor (threat, casting, units in combat), the distance checks, the target
--- menu options, fall detection, error feedback and (hunters) the pet starving notice.
+-- Monitor menu (root entry "Monitor"). The health/resource/party monitors (aq.lua,
+-- "Gesundheit und Status") cannot work on WoW Forever/Camelot -- UnitHealth/UnitPower are
+-- "secret" values there -- so that section is skipped on that client only (SkuCore.aq.lua
+-- is still loaded and its section renders normally on every other client). What follows here
+-- runs everywhere: the combat monitor (threat, casting, units in combat), the distance checks,
+-- the target menu options, fall detection, error feedback and (hunters) the pet starving notice.
 -- Every sub-builder runs under pcall, so one broken part cannot empty the whole menu.
 SkuCore.Aq = SkuCore.Aq or {}
+local tAqHealthStatusMenuBuilder = SkuCore.Aq.MonitorMenuBuilder -- set by aq.lua, if loaded (TOC order)
 function SkuCore.Aq.MonitorMenuBuilder(aEntry)
+   if tAqHealthStatusMenuBuilder and not (Sku and Sku.isForever) then
+      local tOk, tErr = pcall(tAqHealthStatusMenuBuilder, aEntry)
+      if not tOk then
+         dprint("monitorMenu", "health/status build failed", tostring(tErr))
+      end
+   end
+
    local function tAdd(aLabel, aBuild)
       local tEntry = SkuOptions:InjectMenuItems(aEntry, {aLabel}, SkuGenericMenuItem)
       tEntry.dynamic = true

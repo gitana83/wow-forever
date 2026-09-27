@@ -367,10 +367,21 @@ end
 -- nameplateShowPersonal, spellId, canApplyAura, isBossAura, castByPlayer,
 -- nameplateShowAll, timeMod.
 if not UnitAura and C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+	-- WoW Forever/Camelot: in combat the client can mark a unit's aura data "secret"; the
+	-- call then throws ("Auras cannot be accessed when secret while tainted") or hands
+	-- back secret values that blow up at the next compare. Treat a throwing call as "no
+	-- more auras" and blank out any secret field, so the aura code never sees one.
 	UnitAura = function(aUnit, aIndex, aFilter)
-		local t = C_UnitAuras.GetAuraDataByIndex(aUnit, aIndex, aFilter)
-		if not t then return nil end
-		return t.name, t.icon, t.applications, t.dispelName, t.duration, t.expirationTime, t.sourceUnit, t.isStealable, t.nameplateShowPersonal, t.spellId, t.canApplyAura, t.isBossAura, t.isFromPlayerOrPlayerPet, t.nameplateShowAll, t.timeMod
+		local tOk, t = pcall(C_UnitAuras.GetAuraDataByIndex, aUnit, aIndex, aFilter)
+		if not tOk or type(t) ~= "table" then return nil end
+		local tSecret = _G.issecretvalue
+		local function tClean(aValue)
+			if tSecret and tSecret(aValue) then return nil end
+			return aValue
+		end
+		local tName = tClean(t.name)
+		if tName == nil then tName = "?" end
+		return tName, tClean(t.icon), tClean(t.applications), tClean(t.dispelName), tClean(t.duration), tClean(t.expirationTime), tClean(t.sourceUnit), tClean(t.isStealable), tClean(t.nameplateShowPersonal), tClean(t.spellId), tClean(t.canApplyAura), tClean(t.isBossAura), tClean(t.isFromPlayerOrPlayerPet), tClean(t.nameplateShowAll), tClean(t.timeMod)
 	end
 end
 

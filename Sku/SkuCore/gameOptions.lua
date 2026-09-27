@@ -1,4 +1,4 @@
-﻿-- =====================================================================
+-- =====================================================================
 -- Sku Game Options  ("Spieloptionen")
 -- ---------------------------------------------------------------------
 -- Exposes Blizzard's built-in game options (the modern Settings system
@@ -1003,4 +1003,72 @@ function GameOptions:GameMenuBuilder(aParentEntry)
       SkuMenu:BuildNode(aParentEntry, { kind = "action", label = _G.SETTINGS or (_DE and "Einstellungen" or "Settings"), dynamic = false,
          onAction = function() tNavTo(tEinst) end })
    end
+end
+
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- WoW Forever: Blizzard's combat-audio settings ("Blizzard Ansagen") are stored partly account-wide
+-- (CAAEnabled, CAAVolume, target/health announcements ...) and partly PER CHARACTER (the resource
+-- announcements and "say if targeted", see WTF/.../<char>/config-cache.wtf). A new character starts
+-- with the defaults for the per-character ones. So: a character that carries settings of its own
+-- (different from the defaults) publishes them as the account-wide template in Sku's global
+-- settings, and a character that still has the defaults gets the template applied once.
+local tCaaKeys = { "CAAResource1Formats", "CAAResource1Volume", "CAAResource1Percents", "CAASayIfTargeted" }
+
+local function tCaaSync()
+   if not (Sku and Sku.isForever) or InCombatLockdown() then
+      return
+   end
+   local tOk, tErr = pcall(function()
+      if not (C_CVar and C_CVar.GetCVar and C_CVar.GetCVarDefault and C_CVar.SetCVar) then
+         return
+      end
+      local tGlobal = SkuSettings:Sub("SkuCore", nil, "global")
+      -- Not Sku's "char" scope: on Forever the character name is often "Unbekannt" while loading, so
+      -- several characters shared one flag. The GUID is unique per character.
+      local tGuid = UnitGUID("player")
+      if not tGuid then
+         dprint("caaSync", "no player guid yet")
+         return
+      end
+      tGlobal.caaDone = tGlobal.caaDone or {}
+      local tCurrent, tCustom = {}, false
+      for _, tKey in ipairs(tCaaKeys) do
+         local tValue = C_CVar.GetCVar(tKey)
+         local tDefault = C_CVar.GetCVarDefault(tKey)
+         if tValue ~= nil then
+            tCurrent[tKey] = tValue
+            if tValue ~= tDefault then
+               tCustom = true
+            end
+         end
+      end
+      if tCustom then
+         tGlobal.caaTemplate = tCurrent
+         tGlobal.caaDone[tGuid] = true
+         dprint("caaSync", "template saved from this character", tGuid)
+      elseif tGlobal.caaTemplate and not tGlobal.caaDone[tGuid] then
+         local tApplied = 0
+         for tKey, tValue in pairs(tGlobal.caaTemplate) do
+            if C_CVar.SetCVar(tKey, tValue) then
+               tApplied = tApplied + 1
+            end
+         end
+         tGlobal.caaDone[tGuid] = true
+         dprint("caaSync", "template applied", tApplied, tGuid)
+      else
+         dprint("caaSync", "nothing to do", tostring(tGlobal.caaDone[tGuid]), tostring(tGlobal.caaTemplate ~= nil))
+      end
+   end)
+   if not tOk then
+      dprint("caaSync", "failed", tostring(tErr))
+   end
+end
+
+do
+   local tFrame = CreateFrame("Frame")
+   tFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+   tFrame:SetScript("OnEvent", function()
+      C_Timer.After(20, tCaaSync)
+   end)
 end
