@@ -1275,8 +1275,42 @@ local function SpellBookMenuBuilder(aParentEntry, aBooktype, aIsPet, aButtonsWit
 		tNumSpellTabs = GetNumSpellTabs()
 	end
 
+	-- [Forever] Die Berufszauber (Kochkunst, Erste Hilfe, Angeln, ...) stehen dort nicht mehr im Reiter "Allgemein",
+	-- sondern in Blizzards eigenem Berufe-Buch (GetProfessions/GetProfessionInfo mit spellOffset/numSpells im selben
+	-- Spieler-Zauberbuch). Ihre Bereiche werden unten dem ersten Reiter ("Allgemein") zugeschlagen, damit sie dort
+	-- wie unter Classic zu finden sind.
+	local tProfRanges = {}
+	if Sku.isForever and aIsPet == false and _G.GetProfessions and _G.GetProfessionInfo then
+		-- GetProfessions liefert bis zu 5 Werte mit moeglichen Luecken (nil): Haupt 1, Haupt 2, Archaeologie, Angeln, Kochen
+		local tProfResult = { pcall(_G.GetProfessions) }
+		if tProfResult[1] then
+			for i = 2, 6 do
+				if tProfResult[i] then
+					local _, _, _, _, tPNumSpells, tPSpellOffset = GetProfessionInfo(tProfResult[i])
+					if tPNumSpells and tPNumSpells > 0 and tPSpellOffset then
+						tProfRanges[#tProfRanges + 1] = { tPSpellOffset + 1, tPSpellOffset + tPNumSpells }
+					end
+				end
+			end
+		end
+	end
+
 	for x = 1, tNumSpellTabs do
 		local name, texture, offset, numEntries, isGuild, offspecID = GetSpellTabInfo(x)
+		-- Bereiche dieses Reiters (spellbook-Positionen von..bis); Berufe kommen zum ersten Reiter dazu
+		local tRanges = {}
+		if aIsPet == true then
+			tRanges[1] = nil
+		else
+			if numEntries and numEntries > 0 and offset then
+				tRanges[#tRanges + 1] = { offset + 1, offset + numEntries }
+			end
+			if x == 1 then
+				for _, tProfRange in ipairs(tProfRanges) do
+					tRanges[#tRanges + 1] = tProfRange
+				end
+			end
+		end
 		local tNumEntries, token = HasPetSpells()
 		if aIsPet == true then
 			numEntries = tNumEntries or 0
@@ -1296,8 +1330,15 @@ local function SpellBookMenuBuilder(aParentEntry, aBooktype, aIsPet, aButtonsWit
 		end
 		tNewMenuSubEntry.BuildChildren = function(self)
 			local tHasEntries = false
-			if numEntries > 0 then
-				for y = offset + 1, offset + numEntries do
+			-- Haustier: unveraendert ein Bereich aus (Offset, numEntries); Spieler: Reiter-Bereich (+ Berufe im 1. Reiter)
+			local tUseRanges = tRanges
+			if aIsPet == true then
+				tUseRanges = (numEntries > 0) and { { offset + 1, offset + numEntries } } or {}
+			end
+			local tSeenSpellIds = {}
+			if #tUseRanges > 0 then
+				for _, tRange in ipairs(tUseRanges) do
+				for y = tRange[1], tRange[2] do
 					local spellName, spellSubName, spellID = GetSpellBookItemName(y, aBooktype) --BOOKTYPE_PET
 					-- GetSpellBookItemName has the CLASSIC signature here and returns
 					-- only (name, rank) -- the third return is a retail addition, so
@@ -1309,6 +1350,12 @@ local function SpellBookMenuBuilder(aParentEntry, aBooktype, aIsPet, aButtonsWit
 					if not spellID and GetSpellBookItemInfo then
 						local tOkInfo, _, tInfoId = pcall(GetSpellBookItemInfo, y, aBooktype)
 						if tOkInfo then spellID = tInfoId end
+					end
+					-- ein Zauber, der in zwei Bereichen liegt (Reiter + Berufe), nur einmal listen
+					if spellID and tSeenSpellIds[spellID] then
+						spellName = nil
+					elseif spellID then
+						tSeenSpellIds[spellID] = true
 					end
 					if spellName then
 						local tIsPassive = IsPassiveSpell(spellID)
@@ -1369,6 +1416,7 @@ local function SpellBookMenuBuilder(aParentEntry, aBooktype, aIsPet, aButtonsWit
 							tHasEntries = true
 						end
 					end
+				end
 				end
 			end
 			if aIsPet == true then

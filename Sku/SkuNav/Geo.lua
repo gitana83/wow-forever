@@ -527,3 +527,179 @@ SlashCmdList["SKUZONEPROBE"] = function()
 	d.log = tSavedLog
 	print("|cff66ccffSkuZoneProbe|r logged to SkuDebugLog (marker 'skuzoneprobe') - /reload, then read it back")
 end
+
+------------------------------------------------------------------------------------------------------------------------
+-- /skurescue: Diagnose fuer "komme nicht aus dem Wasser". Schreibt Position, Karte und die
+-- naechsten Routen-Wegpunkte (Name, Entfernung, Anzahl Verbindungen) ins SkuDebugLog
+-- (Marker 'skurescue'). Aendert nichts. Danach /reload und Log auslesen.
+------------------------------------------------------------------------------------------------------------------------
+SLASH_SKURESCUE1 = "/skurescue"
+SlashCmdList["SKURESCUE"] = function()
+	if not SkuNav then print("SkuRescue: SkuNav not loaded yet"); return end
+	local d = Sku.debug or {}
+	Sku.debug = d
+	local tSavedLog = d.log
+	d.log = true
+	Sku:DebugLogMark("skurescue")
+	local p = function(...) dprint("SkuRescue", ...) end
+	local ok, err = pcall(function()
+		local x, y = UnitPosition("player")
+		local tUiMap = C_Map.GetBestMapForUnit("player")
+		local tAreaId = SkuNav:GetCurrentAreaId()
+		p("pos", x, y, "| uiMap", tUiMap, "| skuArea", tAreaId, "| swimming", tostring(IsSwimming()), "| submerged", tostring(IsSubmerged()),
+			"| zone", GetRealZoneText(), "| sub", GetSubZoneText())
+		if not (x and y) then p("no UnitPosition"); return end
+		-- 1) Wegpunkte MIT Verbindungen im Umkreis (genau das, was die Navigation benutzt)
+		local tLinked = SkuNav:GetAllLinkedWPsInRangeToCoords(x, y, 300)
+		local tRows = {}
+		for tName, tV in pairs(tLinked) do
+			tRows[#tRows + 1] = {tV.nearestWpRange, tName}
+		end
+		table.sort(tRows, function(a, b) return a[1] < b[1] end)
+		p("linked route waypoints within 300m:", #tRows)
+		for i = 1, math.min(15, #tRows) do
+			p(string.format("LINKED %.0fm %s", tRows[i][1], tostring(tRows[i][2])))
+		end
+		for _, r in ipairs(tRows) do
+			local n = string.lower(tostring(r[2]))
+			if n:find("rescue") or n:find("rettung") then
+				p(string.format("RESCUE-LINKED %.0fm %s", r[1], tostring(r[2])))
+			end
+		end
+		-- 2) naechster Routen-Wegpunkt egal ob verbunden
+		local tCont = select(3, SkuNav:GetAreaData(tAreaId))
+		local tNearName = SkuNav:GetNearestWpToCoords2(x, y, tCont, 1)
+		local tNear = tNearName and SkuNav:GetWaypointData2(tNearName)
+		p("nearest route wp (any):", tostring(tNearName), tNear and tNear.worldX, tNear and tNear.worldY,
+			"dist", tNear and SkuNav:Distance(x, y, tNear.worldX, tNear.worldY), "| continent", tostring(tCont))
+		-- 4) Verbindungen der Rettungspunkte: wohin fuehren sie (Name, Koordinaten, Distanz)?
+		for _, r in ipairs(tRows) do
+			local n = string.lower(tostring(r[2]))
+			if (n:find("rescue") or n:find("rettung")) and r[1] < 200 then
+				local tWp = SkuNav:GetWaypointData2(r[2])
+				local tL = tWp and rawget(tWp, "links")
+				if tWp then
+					p(string.format("LINKS of %s (%.1f,%.1f):", tostring(r[2]), tWp.worldX, tWp.worldY))
+					if tL and tL.byId then
+						for tIdx, tDist in pairs(tL.byId) do
+							local tT = SkuNav:GetWaypointData2(nil, tIdx)
+							p(string.format("   -> %s (%.1f,%.1f) dist=%s", tT and tostring(tT.name) or ("idx"..tostring(tIdx)), tT and tT.worldX or 0, tT and tT.worldY or 0, tostring(tDist)))
+						end
+					else
+						p("   (keine Verbindungen)")
+					end
+				end
+			end
+		end
+	end)
+	if not ok then p("ERROR", tostring(err)) end
+	d.log = tSavedLog
+	print("|cff66ccffSkuRescue|r logged to SkuDebugLog (marker 'skurescue') - /reload, then read it back")
+end
+
+------------------------------------------------------------------------------------------------------------------------
+-- NPC-Logger (ohne Sicht bedienbar): Beim Ansprechen eines NPCs (Gespraech, Lehrer, Haendler) schreibt Sku
+-- Name, NPC-Id, Titel, deine Position und Karte ins SkuDebugLog (Zeilen mit "NpcSeen"). Deine Position ist dann
+-- fast die des NPCs (du stehst direkt davor). Ausserdem /skutarget <Name>: versucht den NPC anzuwaehlen und
+-- loggt, ob er da ist und wie nah (Interaktionsreichweite ja/nein). Aendert nichts an Daten.
+------------------------------------------------------------------------------------------------------------------------
+local function tNpcLog(aWhy, aUnit)
+	local ok, err = pcall(function()
+		if not UnitExists(aUnit) then return end
+		local tGuid = UnitGUID(aUnit)
+		local tType, _, _, _, _, tNpcId = strsplit("-", tGuid or "")
+		local x, y = UnitPosition("player")
+		local d = Sku.debug or {}
+		Sku.debug = d
+		local tSaved = d.log
+		d.log = true
+		dprint("NpcSeen", aWhy, "| name", tostring(UnitName(aUnit)), "| type", tostring(tType), "| id", tostring(tNpcId),
+			"| player pos", x and string.format("%.1f", x), y and string.format("%.1f", y),
+			"| uiMap", tostring(C_Map.GetBestMapForUnit("player")), "| sub", GetSubZoneText())
+		d.log = tSaved
+	end)
+	if not ok then dprint("NpcSeen ERROR", tostring(err)) end
+end
+
+local tNpcFrame = CreateFrame("Frame")
+for _, tEvent in ipairs({"GOSSIP_SHOW", "TRAINER_SHOW", "MERCHANT_SHOW", "QUEST_GREETING", "QUEST_DETAIL", "QUEST_PROGRESS", "QUEST_COMPLETE", "TAXIMAP_OPENED"}) do
+	pcall(tNpcFrame.RegisterEvent, tNpcFrame, tEvent)
+end
+tNpcFrame:SetScript("OnEvent", function(_, aEvent)
+	tNpcLog(aEvent, "npc")
+end)
+
+SLASH_SKUTARGET1 = "/skutarget"
+SlashCmdList["SKUTARGET"] = function(aMsg)
+	local ok, err = pcall(function()
+		if aMsg and aMsg ~= "" then
+			TargetByName(aMsg, true)
+		end
+		local d = Sku.debug or {}
+		Sku.debug = d
+		local tSaved = d.log
+		d.log = true
+		if UnitExists("target") then
+			tNpcLog("skutarget", "target")
+			dprint("NpcSeen", "skutarget interactDist(2=8m,3=10m,4=28m):", tostring(CheckInteractDistance("target", 2)),
+				tostring(CheckInteractDistance("target", 3)), tostring(CheckInteractDistance("target", 4)))
+			print("SkuTarget: " .. tostring(UnitName("target")))
+		else
+			dprint("NpcSeen", "skutarget: kein Ziel gefunden fuer", tostring(aMsg))
+			print("SkuTarget: kein Ziel gefunden")
+		end
+		d.log = tSaved
+	end)
+	if not ok then print("SkuTarget error", tostring(err)) end
+end
+
+------------------------------------------------------------------------------------------------------------------------
+-- /skustuck: Wenn du einer Route folgst und gegen etwas laeufst. Loggt die Strecke (Wegpunkt davor -> Ziel-
+-- Wegpunkt) mit Koordinaten, deiner Position und dem Abstand. So sieht man, welches Streckenstueck blockiert ist.
+-- /skucutlink: loescht genau diese Verbindung (Wegpunkt davor <-> Ziel-Wegpunkt) und bricht die Navigation ab,
+-- danach Ziel neu waehlen - Sku sucht dann einen anderen Weg. Speichert das als eigene Kartendaten.
+------------------------------------------------------------------------------------------------------------------------
+local function tCurrentSegment()
+	local tS = SkuSettings:Sub("SkuNav")
+	local tTarget = tS.metapathFollowingTarget
+	local tMeta = tTarget and tS.metapathFollowingMetapaths and tS.metapathFollowingMetapaths[tTarget]
+	local tCur = tS.metapathFollowingCurrentWp
+	if not (tMeta and tMeta.pathWps and tCur) then return nil end
+	return tMeta.pathWps[tCur - 1], tMeta.pathWps[tCur], tCur, #tMeta.pathWps
+end
+
+SLASH_SKUSTUCK1 = "/skustuck"
+SlashCmdList["SKUSTUCK"] = function()
+	local ok, err = pcall(function()
+		local d = Sku.debug or {}
+		Sku.debug = d
+		local tSaved = d.log
+		d.log = true
+		Sku:DebugLogMark("skustuck")
+		local x, y = UnitPosition("player")
+		local tPrev, tNext, tCur, tTotal = tCurrentSegment()
+		dprint("SkuStuck", "pos", x, y, "| swimming", tostring(IsSwimming()), "| wp nr", tostring(tCur), "/", tostring(tTotal))
+		for _, tN in ipairs({tPrev or "", tNext or ""}) do
+			local tWp = tN ~= "" and SkuNav:GetWaypointData2(tN)
+			if tWp then
+				dprint("SkuStuck", tN == tPrev and "VORHER" or "ZIEL", tN, string.format("(%.1f,%.1f) dist=%.1f", tWp.worldX, tWp.worldY, SkuNav:Distance(x, y, tWp.worldX, tWp.worldY)))
+			end
+		end
+		if not tNext then dprint("SkuStuck", "keine Route aktiv") end
+		d.log = tSaved
+	end)
+	print(ok and "SkuStuck geloggt (Marker skustuck) - /reload, dann Bescheid sagen" or ("SkuStuck Fehler: " .. tostring(err)))
+end
+
+SLASH_SKUCUTLINK1 = "/skucutlink"
+SlashCmdList["SKUCUTLINK"] = function()
+	local ok, err = pcall(function()
+		local tPrev, tNext = tCurrentSegment()
+		if not (tPrev and tNext) then print("SkuCutLink: keine Route aktiv"); return end
+		local tRes = SkuNav:DeleteWpLink(tPrev, tNext)
+		dprint("SkuCutLink", tostring(tPrev), "<->", tostring(tNext), "result", tostring(tRes))
+		SkuNav:EndFollowingWpOrRt()
+		print("SkuCutLink: Verbindung geloescht: " .. tostring(tRes))
+	end)
+	if not ok then print("SkuCutLink Fehler: " .. tostring(err)) end
+end

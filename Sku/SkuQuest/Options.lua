@@ -2505,7 +2505,7 @@ function SkuQuest:MenuBuilder(aParentEntry)
 					tAddTitle = L["(Fehlgeschlagen) "]
 				end
 				if suggestedGroup then
-					tAddTitle = tAddTitle.."("..suggestedGroup..") "
+					tAddTitle = tAddTitle.."("..L["Gruppe"].." "..suggestedGroup..") "
 				end
 				if frequency == 2 then
 					tAddTitle = tAddTitle..L["(Daily) "]

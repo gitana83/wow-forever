@@ -197,6 +197,35 @@ end
 -- was very much open, and silently dropped every bank container out of the
 -- bags menu. The frame check is kept as an OR, so this can only ever ADD a
 -- true case, never take away one that already worked.
+-- Bank-Container-Ids: Classic: -1 (Bank), -3 (Reagenzienbank), 5..11 (Bankfaecher-Taschen).
+-- Forever (Retail-Unterbau, Enum.BagIndex): 5 = Reagenzientasche (Spieler!), 6..14 = Charakter-Bankfach 1..9,
+-- 15..23 = Kriegsmeute-Bankfach 1..9, -1 = Schluesselbund. Nur diese Funktion entscheidet, was Bank ist.
+function SkuCore:IsBankContainerId(aBagId)
+	if not aBagId then return false end
+	if Sku.isForever then
+		return aBagId >= 6 and aBagId <= 23
+	end
+	return aBagId == -1 or aBagId == -3 or (aBagId >= 5 and aBagId <= 11)
+end
+
+-- [Forever] Kauf-Knopf je Bankart (Charakter/Kriegsmeute). Erzeugt aus Blizzards eigener Vorlage
+-- BankPanelPurchaseButtonScriptTemplate (OnClick = Blizzards Kaufabfrage); die Bankart steckt im Attribut
+-- "overrideBankType", so haengt der Kauf nicht von der gerade aktiven Bank-Registerkarte ab.
+local tBankPurchaseButtons = {}
+function SkuCore:GetBankPurchaseButton(aBankType)
+	if aBankType == nil then return nil end
+	if tBankPurchaseButtons[aBankType] then return tBankPurchaseButtons[aBankType] end
+	local tOk, tBtn = pcall(CreateFrame, "Button", "SkuBankPurchaseButton"..tostring(aBankType), UIParent, "BankPanelPurchaseButtonScriptTemplate")
+	if not tOk or not tBtn then
+		dprint("bankbuy", "purchase template missing", tostring(tBtn))
+		return nil
+	end
+	tBtn:SetAttribute("overrideBankType", aBankType)
+	tBtn:Hide()
+	tBankPurchaseButtons[aBankType] = tBtn
+	return tBtn
+end
+
 local tBankFrameOpen = false
 function SkuCore:BankIsOpen()
 	if tBankFrameOpen == true then return true end
@@ -215,7 +244,11 @@ tItemDataDriver:SetScript("OnEvent", function(self, aEvent, arg1)
 	elseif aEvent == "BANKFRAME_OPENED" then
 		tBankFrameOpen = true
 		tPrewarmContainer(-1)
-		for tBagId = 5, 11 do tPrewarmContainer(tBagId) end
+		if Sku.isForever then
+			for tBagId = 6, 23 do tPrewarmContainer(tBagId) end
+		else
+			for tBagId = 5, 11 do tPrewarmContainer(tBagId) end
+		end
 		dprint("itemdata", "prewarm bank")
 	elseif aEvent == "PLAYERBANKSLOTS_CHANGED" then
 		local tItemId = arg1 and GetContainerItemID(-1, arg1)
@@ -628,6 +661,21 @@ local tBagSlotList = {
 	[-2] = L["keyring"],
 	[-3] = L["Reagent bank"],
 }
+
+-- [Forever] Bank-/Taschen-Ids weichen von Classic ab (siehe SkuCore:IsBankContainerId): 5 = Reagenzientasche
+-- (gehoert dem Spieler), 6..14 = Charakter-Bankfaecher, 15..23 = Kriegsmeute-Bankfaecher, -1 = Schluesselbund.
+if Sku.isForever then
+	for k in pairs(tBagSlotList) do tBagSlotList[k] = nil end
+	for i = 0, 4 do tBagSlotList[i] = L["Bag"].." "..(i + 1) end
+	tBagSlotList[5] = Sku.deEn("Reagenzientasche", "Reagent bag", "Sac de composants")
+	for i = 6, 14 do tBagSlotList[i] = L["Bank"].." "..Sku.deEn("Fach ", "tab ", "onglet ")..(i - 5) end
+	for i = 15, 23 do tBagSlotList[i] = Sku.deEn("Kriegsmeute-Bank Fach ", "Warband bank tab ", "Banque de bataillon onglet ")..(i - 14) end
+	tBagSlotList[-1] = L["keyring"]
+	for k in pairs(tBagSlotListSorted) do tBagSlotListSorted[k] = nil end
+	for i = 0, 23 do tBagSlotListSorted[#tBagSlotListSorted + 1] = i end
+	tBagSlotListSorted[#tBagSlotListSorted + 1] = -1
+end
+
 local function OpenAllBagsHelper()
 	-- OpenBag force-opens a container frame (protected in combat). In combat we
 	-- only READ what the player already opened via Blizzard's own B key, so skip
@@ -1380,7 +1428,9 @@ end
 ---------------------------------------------------------------------------------------------------------------------------------------
 local ContainerFrame1Hook
 function SkuCore:Build_BagsFrame(aParentChilds)
-	if not ContainerFrame1Hook then
+	-- [Forever] kein Hide-Haken: er liess Blizzards Taschenfenster-Code aus Sku-Code laufen und
+	-- verunreinigte ContainerFrame1.size/Items (Taint -> Bank-Kauf gesperrt). Forever schliesst seine Fenster selbst.
+	if not ContainerFrame1Hook and not Sku.isForever then
 		hooksecurefunc(_G["ContainerFrame1"], "Hide", function()
 			for x = 2, 15 do
 				if _G["ContainerFrame"..x] then
@@ -1410,12 +1460,12 @@ function SkuCore:Build_BagsFrame(aParentChilds)
 	-- reachable with its frame already up).
 	for q = 1, #tBagSlotListSorted do
 		local bagId = tBagSlotListSorted[q]
-		local tIsBankSlot = (bagId == -1 and SkuCore:BankIsOpen() == true)
+		local tIsBankSlot = (not Sku.isForever and bagId == -1 and SkuCore:BankIsOpen() == true)
 		local tNumSlots = GetContainerNumSlots(bagId) or 0
 		-- BUGFIX: the bank container (-1) reports its 28 slots even when the bank UI is
 		-- closed, producing a phantom "Bank" view in the bags menu. Only include it while the
 		-- bank frame is actually open (0 slots -> the slot loop skips it, no bag node created).
-		if bagId == -1 and not SkuCore:BankIsOpen() then
+		if ((Sku.isForever and SkuCore:IsBankContainerId(bagId)) or (not Sku.isForever and bagId == -1)) and not SkuCore:BankIsOpen() then
 			tNumSlots = 0
 		end
 		-- [v43.0] The keyring container reports its MAXIMUM (32) here, but most of
@@ -1537,7 +1587,7 @@ function SkuCore:Build_BagsFrame(aParentChilds)
 
 			tBagResultsByBag[bagId].childs[#tBagResultsByBag[bagId].childs + 1] = bagItemButton
 			-- non-empty items in the real bags also go into the flat "all items" list
-			if not isEmpty and bagId >= 0 and bagId <= 4 then
+			if not isEmpty and ((bagId >= 0 and bagId <= 4) or (Sku.isForever and bagId == 5)) then
 				local copy = {}
 				for k, v in pairs(bagItemButton) do
 					copy[k] = v
@@ -1553,7 +1603,7 @@ function SkuCore:Build_BagsFrame(aParentChilds)
 			-- menu actions key on, so a row here behaves exactly like the same row inside
 			-- its bank bag: ENTER reads it, CTRL-ENTER moves it out to the bags via the
 			-- tIsBankContainer branch in SkuZOptions/Core.lua.
-			elseif not isEmpty and (bagId == -1 or bagId == -3 or (bagId >= 5 and bagId <= 11)) then
+			elseif not isEmpty and SkuCore:IsBankContainerId(bagId) then
 				local copy = {}
 				for k, v in pairs(bagItemButton) do
 					copy[k] = v
@@ -1681,6 +1731,87 @@ function SkuCore:Build_BagsFrame(aParentChilds)
 			childs = allBankResults,
 		}
 	end
+
+	-- [Forever] Bankfaecher kaufen, fuer Charakter-Bank UND Kriegsmeute-Bank. C_Bank.PurchaseBankTab ist
+	-- geschuetzt und darf nur aus Blizzards eigenem, ungetaintetem Ablauf laufen. Deshalb ruft der Eintrag
+	-- NICHT die API auf, sondern klickt (sicherer Klick des Menue-Knopfs, siehe secureClickFrame) einen Knopf aus
+	-- Blizzards eigener Vorlage BankPanelPurchaseButtonScriptTemplate, dessen Bankart per Attribut
+	-- "overrideBankType" fest eingestellt ist - unabhaengig davon, welche Bank-Registerkarte gerade aktiv ist.
+	-- Der Knopf zeigt Blizzards Bestaetigungs-Popup (CONFIRM_BUY_BANK_TAB, mit Preis). Gekauft wird erst,
+	-- wenn Lena dort "Ja" waehlt (Popup-Menue) - nie automatisch.
+	if Sku.isForever and SkuCore:BankIsOpen() == true and _G.C_Bank and _G.Enum and _G.Enum.BankType then
+		local tBankTypes = {
+			{ bankType = Enum.BankType.Character, name = Sku.deEn("Charakter-Bank", "Character bank", "Banque du personnage") },
+			{ bankType = Enum.BankType.Account, name = Sku.deEn("Kriegsmeute-Bank", "Warband bank", "Banque de bataillon") },
+		}
+		for _, tInfo in ipairs(tBankTypes) do
+			local tOkView, tCanView = pcall(C_Bank.CanViewBank, tInfo.bankType)
+			if tOkView and tCanView then
+				local tOkBuy, tCanBuy = pcall(C_Bank.CanPurchaseBankTab, tInfo.bankType)
+				local tBtn = SkuCore:GetBankPurchaseButton(tInfo.bankType)
+				if tOkBuy and tCanBuy and tBtn then
+					local tTabData = C_Bank.FetchNextPurchasableBankTabData(tInfo.bankType)
+					local tCost = (tTabData and tTabData.tabCost and tTabData.tabCost > 0) and SkuGetCoinText(tTabData.tabCost)
+						or Sku.deEn("kostenlos", "free", "gratuit")
+					if tTabData and tTabData.canAfford == false then
+						tCost = tCost.." "..Sku.deEn("(zu wenig Gold)", "(not enough gold)", "(pas assez d'or)")
+					end
+					local tBuyName = Sku.deEn("Bankfach kaufen", "Buy bank tab", "Acheter un onglet de banque").." "..tInfo.name.." "..tCost
+					table.insert(aParentChilds, tBuyName)
+					aParentChilds[tBuyName] = {
+						frameName = "",
+						RoC = "Child",
+						type = "Button",
+						obj = tBtn,
+						textFirstLine = tBuyName,
+						textFull = Sku.deEn("Oeffnet Blizzards Kaufabfrage. Gekauft wird erst nach Bestaetigung mit Ja.",
+							"Opens Blizzard's purchase prompt. Nothing is bought until you confirm with Yes.",
+							"Ouvre la demande d'achat. Rien n'est achete sans confirmation."),
+						noMenuNumbers = true,
+						childs = {},
+						directAction = true,
+						secureClickFrame = tBtn,
+						func = function()
+							-- Rueckmeldung, falls Blizzards Kaufabfrage nicht erscheint (Klick laeuft VOR dieser Funktion).
+							C_Timer.After(0.5, function()
+								if not (_G.StaticPopup_Visible and _G.StaticPopup_Visible("CONFIRM_BUY_BANK_TAB")) then
+									dprint("bankbuy", "popup did not appear", tostring(tInfo.bankType))
+									if SkuOptions and SkuOptions.Voice and SkuOptions.Voice.OutputStringBTtts then
+										SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Kaufabfrage nicht erschienen", "Purchase prompt did not appear", "Demande absente"), false, true, 0.1)
+									end
+								end
+							end)
+						end,
+					}
+					else
+						-- Kein Kauf-Eintrag: Grund immer ansagen, damit nichts "einfach fehlt".
+						local tWhy
+						local tOkMax, tMax = pcall(C_Bank.HasMaxBankTabs, tInfo.bankType)
+						local tOkLock, tLock = pcall(C_Bank.FetchBankLockedReason, tInfo.bankType)
+						if tOkLock and tLock ~= nil then
+							tWhy = Sku.deEn("gesperrt", "locked", "verrouillee")
+						elseif tOkMax and tMax then
+							tWhy = Sku.deEn("alle Faecher gekauft", "all tabs purchased", "tous les onglets achetes")
+						else
+							tWhy = Sku.deEn("Kauf gerade nicht moeglich", "purchase not possible right now", "achat impossible pour le moment")
+						end
+						local tInfoName = tInfo.name.." "..tWhy
+						table.insert(aParentChilds, tInfoName)
+						aParentChilds[tInfoName] = {
+							frameName = "", RoC = "Child", type = "Text", textFirstLine = tInfoName, textFull = "",
+							noMenuNumbers = true, childs = {},
+						}
+					end
+				else
+					local tInfoName = tInfo.name.." "..Sku.deEn("nicht verfuegbar", "not available", "indisponible")
+					table.insert(aParentChilds, tInfoName)
+					aParentChilds[tInfoName] = {
+						frameName = "", RoC = "Child", type = "Text", textFirstLine = tInfoName, textFull = "",
+						noMenuNumbers = true, childs = {},
+					}
+				end
+			end
+		end
 
 	local tFriendlyName = L["Bags"]
 	table.insert(aParentChilds, tFriendlyName)
@@ -2638,6 +2769,18 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 
 	local tFrameName = "CharacterLevelText"
 	local tFriendlyName = _G["CharacterLevelText"]:GetText()
+	if Sku.isForever then
+		-- [Forever] CharacterLevelText wird erst befuellt, wenn Blizzards Charakterfenster einmal offen war, und
+		-- enthaelt Farbcodes. Zeile deshalb aus den Spielerdaten selbst bauen (Name, Stufe, Volk, Klasse).
+		local tName, tRace, tClass = UnitName("player"), UnitRace("player"), UnitClass("player")
+		local tParts = {}
+		if tName then tParts[#tParts + 1] = tName end
+		tParts[#tParts + 1] = (_G.LEVEL or "Level").." "..tostring(UnitLevel("player") or "")
+		if tRace then tParts[#tParts + 1] = tRace end
+		if tClass then tParts[#tParts + 1] = tClass end
+		tFriendlyName = table.concat(tParts, ", ")
+	end
+	tFriendlyName = SkuUtil:Unescape(tFriendlyName or "")
 	table.insert(aParentChilds, tFriendlyName)
 	aParentChilds[tFriendlyName] = {
 		frameName = tFrameName,
@@ -2749,7 +2892,117 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 			return SkuUtil:Unescape(table.concat(tLines, "\r\n"))
 		end
 
-		if not Sku.isTBC then
+		local tForeverStatsBuilt = false
+		if Sku.isForever and _G.PAPERDOLL_STATCATEGORIES and _G.PAPERDOLL_STATINFO then
+			-- [Forever] Blizzards Charakterfenster ist hier ein Retail-artiges Werte-Fenster (Kategorien in
+			-- PAPERDOLL_STATCATEGORIES, je Wert eine updateFunc in PAPERDOLL_STATINFO), die alten Widgets
+			-- CharacterStatFrameN/PlayerStatFrameLeft1 gibt es nicht. Die Werte werden deshalb ueber genau diese
+			-- Blizzard-Tabellen gelesen: jede updateFunc schreibt in einen privaten, unsichtbaren Stat-Rahmen
+			-- (Label/Value/tooltip...), aus dem Sku Name, Wert und Tooltip liest. Fehler (z.B. geheime Werte) werden
+			-- je Wert abgefangen und der Wert ausgelassen, statt das Menue zu kippen.
+			local tScratch = SkuCore.foreverStatScratch
+			if not tScratch then
+				tScratch = CreateFrame("Frame", nil, UIParent)
+				tScratch:SetSize(10, 10)
+				tScratch:SetAlpha(0)
+				tScratch.Label = tScratch:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+				tScratch.Value = tScratch:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+				tScratch.Background = tScratch:CreateTexture(nil, "BACKGROUND")
+				tScratch.Icon = tScratch:CreateTexture(nil, "ARTWORK")
+				tScratch:SetScript("OnEnter", function(self)
+					if self.onEnterFunc then
+						self:onEnterFunc()
+					elseif _G.PaperDollStatTooltip then
+						_G.PaperDollStatTooltip(self)
+					end
+				end)
+				tScratch:Hide()
+				SkuCore.foreverStatScratch = tScratch
+			end
+
+			-- liest EINEN Wert; gibt Name ("Label: Wert"), Tooltip zurueck oder nil, wenn der Wert nicht angezeigt wird
+			local function tReadForeverStat(aStatKey, aUnit, aId, aHideAt)
+				local tInfo = _G.PAPERDOLL_STATINFO[aStatKey]
+				if not tInfo or not tInfo.updateFunc then return nil end
+				local f = tScratch
+				f.onEnterFunc, f.UpdateTooltip, f.tooltip, f.tooltip2, f.tooltip3, f.numericValue = nil, nil, nil, nil, nil, nil
+				f.Label:SetText("")
+				f.Value:SetText("")
+				f:Show()
+				local tOk, tNumeric = pcall(tInfo.updateFunc, f, aUnit, aId)
+				local tShown = f:IsShown()
+				f:Hide()
+				if not tOk or not tShown then return nil end
+				if aHideAt ~= nil then
+					local tOkCmp, tHide = pcall(function() return tNumeric == aHideAt end)
+					if tOkCmp and tHide then return nil end
+				end
+				local tLabel, tValue = f.Label:GetText(), f.Value:GetText()
+				if not tLabel or tLabel == "" then return nil end
+				tLabel = tLabel:gsub("%s*[:：]%s*$", "")
+				local tName = SkuUtil:Unescape(tLabel..": "..(tValue or ""))
+				f:Show()
+				local tFull = tReadStatFrameTooltip(f)
+				f:Hide()
+				return tName, tFull
+			end
+
+			for _, tCat in ipairs(_G.PAPERDOLL_STATCATEGORIES) do
+				if tCat.unit == "player" and tCat.stats then
+					local tCatName = SkuUtil:Unescape(tostring(tCat.categoryName or ""))
+					local tCatNode = {
+						frameName = "", RoC = "Child", type = "Button", textFirstLine = tCatName, textFull = "",
+						childs = {},
+					}
+					for _, tStat in ipairs(tCat.stats) do
+						local tShow = true
+						if tStat.showFunc then
+							local tOkS, tRes = pcall(tStat.showFunc)
+							tShow = tOkS and tRes and true or false
+						end
+						if tShow then
+							local tLive = function() return tReadForeverStat(tStat.stat, "player", tStat.id, tStat.hideAt) end
+							local tName, tFull = tLive()
+							if tName and not tCatNode.childs[tName] then
+								table.insert(tCatNode.childs, tName)
+								tCatNode.childs[tName] = {
+									frameName = "", RoC = "Child", type = "Button",
+									textFirstLine = tName, textFull = tFull or "", childs = {},
+									liveName = tLive,
+								}
+							end
+						end
+					end
+					if #tCatNode.childs > 0 then
+						table.insert(tParentStats, tCatName)
+						tParentStats[tCatName] = tCatNode
+					end
+				end
+			end
+
+			-- Widerstaende: stehen bei Blizzard in keiner Kategorie, aber in PAPERDOLL_STATINFO
+			do
+				local tResName = L["Resistances"]
+				local tResNode = { frameName = "", RoC = "Child", type = "Button", textFirstLine = tResName, textFull = "", childs = {} }
+				for _, tKey in ipairs({"HOLY_RESIST", "FIRE_RESIST", "NATURE_RESIST", "FROST_RESIST", "SHADOW_RESIST", "ARCANE_RESIST"}) do
+					local tLive = function() return tReadForeverStat(tKey, "player") end
+					local tName, tFull = tLive()
+					if tName and not tResNode.childs[tName] then
+						table.insert(tResNode.childs, tName)
+						tResNode.childs[tName] = {
+							frameName = "", RoC = "Child", type = "Button", textFirstLine = tName, textFull = tFull or "", childs = {},
+							liveName = tLive,
+						}
+					end
+				end
+				if #tResNode.childs > 0 then
+					table.insert(tParentStats, tResName)
+					tParentStats[tResName] = tResNode
+				end
+			end
+			tForeverStatsBuilt = true
+			dprint("charstats", "forever groups", #tParentStats)
+		elseif not Sku.isTBC then
 			local tStatFrames = {
 				"CharacterStatFrame1",
 				"CharacterStatFrame2",
@@ -2930,6 +3183,7 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 
 		end
 
+		if not tForeverStatsBuilt then
 		local tFrameName = v
 		local tFriendlyName = L["Resistances"]
 		table.insert(tParentStats, tFriendlyName)
@@ -2965,6 +3219,7 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 				childs = {},
 				--click = true,
 			}
+		end
 		end
 	end
 
@@ -5691,7 +5946,7 @@ local function tSkuCheckBags()
 		-- Same gate as Build_BagsFrame: the CLOSED bank still reports 28 slots but
 		-- reads are not valid then -- sweeping it would only produce noise. Say so
 		-- in the log instead of skipping silently.
-		if tBagId == -1 and not SkuCore:BankIsOpen() then
+		if ((Sku.isForever and SkuCore:IsBankContainerId(tBagId)) or (not Sku.isForever and tBagId == -1)) and not SkuCore:BankIsOpen() then
 			if tNumSlots > 0 then
 				dprint("skucheck", "bags: bank (-1) skipped, bank closed")
 			end

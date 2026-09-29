@@ -3051,7 +3051,12 @@ function SkuOptions:StageClickMacros(aNode)
 		if aNode.applyMacrotext and SpellIsTargeting and SpellIsTargeting() then
 			tMacrotext = aNode.applyMacrotext
 		end
-		if tMacrotext and tClickGateOk then
+		if aNode.secureClickFrame and tClickGateOk then
+			-- unbenannter Blizzard-Knopf: secure "click"-Aktion mit Frame-Objekt (kein Namen-Lookup)
+			_G["SecureOnSkuOptionsMainOption1"]:SetAttribute("type","click")
+			_G["SecureOnSkuOptionsMainOption1"]:SetAttribute("clickbutton", aNode.secureClickFrame)
+			_G["SecureOnSkuOptionsMainOption1"]:SetAttribute("macrotext","")
+		elseif tMacrotext and tClickGateOk then
 			--dprint("macrotext", tMacrotext)
 			_G["SecureOnSkuOptionsMainOption1"]:SetAttribute("type","macro")
 			_G["SecureOnSkuOptionsMainOption1"]:SetAttribute("macrotext", tMacrotext)
@@ -3577,6 +3582,12 @@ function SkuOptions:CreateMenuFrame()
 					local tIncomplete = false
 					local tOk, tText = pcall(function()
 						local i = tInfo.index
+						-- [Forever] Berufe-Fenster: Text aus der Handwerks-API (SkuCore/professionsForever.lua)
+						if tInfo.api == "prof" and SkuCore.ProfessionRecipeText then
+							local tProfText, tProfIncomplete = SkuCore:ProfessionRecipeText(i)
+							tIncomplete = tProfIncomplete and true or false
+							return tProfText
+						end
 						local tName, tNum, tGetReagent, tGetLink, tGetReagentLink
 						if tInfo.api == "craft" then
 							tName = _G.GetCraftInfo and _G.GetCraftInfo(i)
@@ -3954,6 +3965,10 @@ function SkuOptions:CreateMenuFrame()
 				--_G["QuestFrameDetailPanel"]:Hide()
 				_G["TradeSkillFrameCloseButton"]:GetScript("OnClick")(_G["TradeSkillFrameCloseButton"])
 			end
+		end
+		-- [Forever] Berufe-Fenster (Retail-artiges Handwerksfenster) schliessen
+		if _G["ProfessionsFrame"] and _G["ProfessionsFrame"]:IsVisible() == true then
+			if _G.HideUIPanel then pcall(_G.HideUIPanel, _G["ProfessionsFrame"]) else _G["ProfessionsFrame"]:Hide() end
 		end
 
 		if _G["QuestFrameDetailPanel"]:IsVisible() == true then
@@ -6046,7 +6061,9 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 	for x = 1, #aGossipListTable do
 		local index = aGossipListTable[x]
 
-		if #aGossipListTable[index].childs == 0 then
+		-- lazyChilds: Eintrag mit Untermenue, dessen Kinder erst beim Oeffnen berechnet werden (Berufe auf Forever:
+		-- passende Gegenstaende zum Verzaubern/Zerlegen). childs bleibt leer, deshalb wuerde der Eintrag sonst als Blatt gelten.
+		if #aGossipListTable[index].childs == 0 and not aGossipListTable[index].lazyChilds then
 			--dprint(aTab, x, "ENTRIY: "..aGossipListTable[index].textFirstLine)
 			local tNewMenuEntry = SkuOptions:InjectMenuItems(aParentMenuTable, {aGossipListTable[index].textFirstLine}, SkuGenericMenuItem)
 			if aGossipListTable[index].noMenuNumbers then
@@ -6144,6 +6161,11 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 			-- and OnEnter never sees it.
 			if aGossipListTable[index].directClickButton then
 				tNewMenuEntry.directClickButton = aGossipListTable[index].directClickButton
+			end
+			-- secureClickFrame: Frame-OBJEKT (kein Name noetig), das der sichere Menue-Knopf per
+			-- type="click" anklickt (siehe StageClickMacros). Fuer unbenannte Blizzard-Knoepfe.
+			if aGossipListTable[index].secureClickFrame then
+				tNewMenuEntry.secureClickFrame = aGossipListTable[index].secureClickFrame
 			end
 			-- [Rezept-Tooltip] skuRecipeInfo (api + Rezeptindex) auf den Knoten uebertragen,
 			-- damit Shift Runter den Rezept-Tooltip per API bauen kann. Ohne diese Kopie
@@ -6461,7 +6483,7 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 								local lListNode    = lTalentNode and lTalentNode.parent
 
 								aGossipListTable[index].func(aGossipListTable[index].obj, "LeftButton")
-								if not aGossipListTable[index].obj:GetName() then
+								if not aGossipListTable[index].obj or not aGossipListTable[index].obj:GetName() then
 									SkuCore:CheckFrames()
 								else
 									if string.find(aGossipListTable[index].obj:GetName(), "Tab") then
@@ -6512,7 +6534,7 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 							else
 								-- Klassischer Pfad — unverändert.
 								aGossipListTable[index].func(aGossipListTable[index].obj, "LeftButton")
-								if not aGossipListTable[index].obj:GetName() then
+								if not aGossipListTable[index].obj or not aGossipListTable[index].obj:GetName() then
 									SkuCore:CheckFrames()
 								else
 									if string.find(aGossipListTable[index].obj:GetName(), "Tab") then
@@ -6644,7 +6666,7 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 						-- The plain UseContainerItem moves the item fine but does NOT refresh
 						-- our menu, so drive CheckFrames()/OnUpdate() after the bag settles
 						-- (that was the "item still showed in the bank list" symptom).
-						local tIsBankContainer = (lBag == -1 or lBag == -3 or (lBag >= 5 and lBag <= 11))
+						local tIsBankContainer = SkuCore:IsBankContainerId(lBag)
 						if tIsBankContainer then
 							tNewMenuEntry.OnRightAction = function()
 								-- Drive the SAME event-driven confirm the normal-bag "/use"
@@ -6727,7 +6749,7 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 					else
 						tNewMenuEntry.OnRightAction = function()
 							aGossipListTable[index].func(aGossipListTable[index].obj, "RightButton")
-							if not aGossipListTable[index].obj:GetName() then
+							if not aGossipListTable[index].obj or not aGossipListTable[index].obj:GetName() then
 								SkuCore:CheckFrames()
 							else
 								if string.find(aGossipListTable[index].obj:GetName(), "Tab") then
@@ -7093,6 +7115,10 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 			if aGossipListTable[index].noMenuNumbers then
 				tNewMenuEntry.noMenuNumbers = true
 			end
+			-- [Rezept-Tooltip] auch Eintraege MIT Untermenue (Berufe-Fenster auf Forever: Rezept mit Herstellen-Aktionen)
+			if aGossipListTable[index].skuRecipeInfo then
+				tNewMenuEntry.skuRecipeInfo = aGossipListTable[index].skuRecipeInfo
+			end
 
 			if aGossipListTable[index].textFull then
 				if aGossipListTable[index].textFull ~= "" then
@@ -7106,7 +7132,12 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 
 			tNewMenuEntry.BuildChildren = function(self)
 				self.children = {}
-				SkuIterateGossipList(aGossipListTable[index].childs, self, aTab.."  ")
+				local tChilds = aGossipListTable[index].childs
+				if aGossipListTable[index].lazyChilds then
+					local tOkLazy, tLazy = pcall(aGossipListTable[index].lazyChilds)
+					if tOkLazy and type(tLazy) == "table" then tChilds = tLazy end
+				end
+				SkuIterateGossipList(tChilds, self, aTab.."  ")
 			end
 		end
 

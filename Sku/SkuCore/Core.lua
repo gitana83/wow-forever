@@ -269,6 +269,23 @@ SkuStatus = {
 -- Draußen-Ansage eine eventuell parallel laufende TTS, ohne sie zu
 -- unterbrechen — der User hört im Zweifel beides gleichzeitig, aber
 -- die Zonen-Ansage geht garantiert raus.
+-- Forever hat kein globales MirrorTimer1 mehr (Retail-Unterbau): erst das
+-- alte Frame probieren, sonst per GetMirrorTimerInfo nach dem Atem-Timer suchen.
+local function tIsBreathTimerActive()
+	local tFrame = _G["MirrorTimer1"]
+	if tFrame and tFrame.IsVisible then
+		return tFrame:IsVisible() == true
+	end
+	if GetMirrorTimerInfo then
+		for tIndex = 1, 3 do
+			if GetMirrorTimerInfo(tIndex) == "BREATH" then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function tPlayZoneAudio(aKey)
 	if not (SkuOptions and SkuOptions.Voice and SkuOptions.Voice.GetAudiodata) then
 		return
@@ -364,6 +381,7 @@ SkuCore.interactFramesListManual = {
 	["GuildBankFrame"] = function(...) SkuCore:Build_GuildBankFrame(...) end,
 	["CraftFrame"] = function(...) SkuCore:Build_CraftFrame(...) end,
 	["TradeSkillFrame"] = function(...) SkuCore:Build_TradeSkillFrame(...) end,
+	["ProfessionsFrame"] = function(...) SkuCore:Build_ProfessionsFrame(...) end,
 	["PetStableFrame"] = function(...) SkuCore:Build_PetStableFrame(...) end,
 	["GossipFrame"] = function(...) SkuCore:GossipFrame(...) end,
 	["QuestFrame"] = function(...) SkuCore:QuestFrame(...) end,
@@ -420,6 +438,7 @@ SkuCore.interactFramesList = {
 	--"GroupLootContainer",
 	"TradeFrame",
 	"TradeSkillFrame",
+	"ProfessionsFrame",
 	--"DropDownList2",
 	--"FriendsFrame",
 	--"GameMenuFrame",
@@ -447,8 +466,18 @@ SkuCore.interactFramesList = {
 SkuCore.localWindowContributors = {
 	{ frame = "MailFrame",    label = function() return Sku.L["Mail"] end,
 	  build = function(self) if SkuCore.MailMenuBuilder then SkuCore.MailMenuBuilder(self) end end },
-	{ frame = "AuctionFrame", label = function() return Sku.L["Auktionshaus"] end,
-	  build = function(self) if SkuCore.AuctionHouse and SkuCore.AuctionHouse.AuctionHouseMenuBuilder then SkuCore.AuctionHouse.AuctionHouseMenuBuilder(self) end end },
+	-- Forever's Auction House is Blizzard's NEW UI (AuctionHouseFrame/C_AuctionHouse),
+	-- not the classic AuctionFrame every other client here still uses - without this
+	-- branch the contributor's frame check never matches on Forever (AuctionFrame is
+	-- nil there) and the whole "Auktionshaus" entry silently never appears.
+	{ frame = Sku.isForever and "AuctionHouseFrame" or "AuctionFrame", label = function() return Sku.L["Auktionshaus"] end,
+	  build = function(self)
+	     if Sku.isForever then
+	        if SkuCore.AuctionHouseForever and SkuCore.AuctionHouseForever.MenuBuilder then SkuCore.AuctionHouseForever:MenuBuilder(self) end
+	     else
+	        if SkuCore.AuctionHouse and SkuCore.AuctionHouse.AuctionHouseMenuBuilder then SkuCore.AuctionHouse.AuctionHouseMenuBuilder(self) end
+	     end
+	  end },
 	{ frame = "FriendsFrame", label = function() return Sku.L["Social"] end,
 	  build = function(self) if SkuCore.Friends and SkuCore.Friends.FriendsMenuBuilder then SkuCore.Friends.FriendsMenuBuilder(self) end end },
 	{ frame = "QuestLogFrame", label = function() return Sku.L["SkuQuestMenuEntry"] end,
@@ -637,6 +666,12 @@ function SkuCore:OnInitialize()
 	-- (SkuCore:RefreshProfessionMenu, LocalMenu.lua).
 	SkuDispatcher:RegisterEventCallback("TRADE_SKILL_UPDATE", SkuCore.PROFESSION_LIST_UPDATE)
 	SkuDispatcher:RegisterEventCallback("CRAFT_UPDATE", SkuCore.PROFESSION_LIST_UPDATE)
+	-- WoW Forever: Berufe-Fenster (ProfessionsFrame) - eigene Aktualisierung in SkuCore/professionsForever.lua
+	if SkuCore.PROFESSIONS_LIST_UPDATE then
+		SkuDispatcher:RegisterEventCallback("TRADE_SKILL_LIST_UPDATE", SkuCore.PROFESSIONS_LIST_UPDATE)
+		SkuDispatcher:RegisterEventCallback("TRADE_SKILL_DATA_SOURCE_CHANGED", SkuCore.PROFESSIONS_LIST_UPDATE)
+		SkuDispatcher:RegisterEventCallback("TRADE_SKILL_ITEM_CRAFTED_RESULT", SkuCore.PROFESSIONS_LIST_UPDATE)
+	end
 	SkuDispatcher:RegisterEventCallback("TRADE_SHOW", SkuCore.TRADE_SHOW)
 	SkuDispatcher:RegisterEventCallback("TRADE_CLOSED", SkuCore.TRADE_CLOSED)
 	SkuDispatcher:RegisterEventCallback("TRADE_ACCEPT_UPDATE", SkuCore.TRADE_ACCEPT_UPDATE)
@@ -2004,7 +2039,7 @@ function SkuCore:OnEnable()
 				tPlayZoneAudio("male-Draußen")
 			end
 		end
-		if IsSubmerged() == true and _G["MirrorTimer1"]:IsVisible() == true then
+		if IsSubmerged() == true and tIsBreathTimerActive() == true then
 			if SkuStatus.submerged == 0 then
 				SkuStatus.submerged = GetTime()
 				SkuStatus.swimming = 0
@@ -3474,8 +3509,12 @@ function SkuCore:PLAYER_ENTERING_WORLD(...)
 		hooksecurefunc(TaxiFrame, "Show", SkuCore.TaxiFrame_OnShow)
 		hooksecurefunc(TaxiFrame, "Hide", SkuCore.TaxiFrame_OnHide)
 		
-		MainMenuBarBackpackButton:Click()
-		MainMenuBarBackpackButton:Click()
+		-- [Forever] Kein Rucksack-Click: aus Sku-Code getaintet (taint.log: ToggleBag -> CloseAllBags setzt Blizzards Taschen-Merker getaintet),
+		-- das vergiftete spaeter das Bank-Oeffnen (PurchaseBankTab blockiert). Das Taschenmenue nutzt die Container-API.
+		if not Sku.isForever then
+			MainMenuBarBackpackButton:Click()
+			MainMenuBarBackpackButton:Click()
+		end
 
 		-- Prime the in-combat item-use mirrors (bag tree + character-slot tree) at login so
 		-- the very FIRST combat of a session can /use bag items and on-use gear even if the
@@ -4755,6 +4794,7 @@ local friendlyFrameNames = {
 	["BankFrame"] = L["Bank"],
 	["GuildBankFrame"] = L["Guild Bank"],
 	["TradeSkillFrame"] = L["Trade skill"],
+	["ProfessionsFrame"] = L["Trade skill"],
 	["ReadyCheckFrame"] = L["Bereitschaft check"],
 	[""] = "",
 }

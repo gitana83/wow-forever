@@ -409,12 +409,23 @@ if not GetQuestLogTitle and C_QuestLog and C_QuestLog.GetInfo then
 	GetQuestLogTitle = function(aIndex)
 		local t = C_QuestLog.GetInfo(aIndex)
 		if not t then return nil end
+		-- Alte Semantik von isComplete: 1 = fertig, -1 = fehlgeschlagen, nil = offen. Die C_QuestLog-Ersatzfunktionen
+		-- liefern Booleans; alle Aufrufer vergleichen mit 1/-1, "true" liess "(Fertig)" still ausfallen.
 		local tIsComplete = nil
-		if t.questID and C_QuestLog.IsComplete then
-			local tOk, tRes = pcall(C_QuestLog.IsComplete, t.questID)
-			if tOk then tIsComplete = tRes end
+		if t.questID and not t.isHeader then
+			if C_QuestLog.IsFailed then
+				local tOkF, tFailed = pcall(C_QuestLog.IsFailed, t.questID)
+				if tOkF and tFailed == true then tIsComplete = -1 end
+			end
+			if tIsComplete == nil and C_QuestLog.IsComplete then
+				local tOk, tRes = pcall(C_QuestLog.IsComplete, t.questID)
+				if tOk and tRes == true then tIsComplete = 1 end
+			end
 		end
-		return t.title, t.level, t.suggestedGroup, t.isHeader, t.isCollapsed, tIsComplete, t.frequency, t.questID, t.startEvent, nil, t.isOnMap, t.hasLocalPOI, t.isTask, t.isStory
+		-- suggestedGroup = 0 ("keine Gruppe") ist in Lua wahr und wurde als "(0) " vor dem Titel gesprochen.
+		local tSuggestedGroup = t.suggestedGroup
+		if not tSuggestedGroup or tSuggestedGroup <= 0 then tSuggestedGroup = nil end
+		return t.title, t.level, tSuggestedGroup, t.isHeader, t.isCollapsed, tIsComplete, t.frequency, t.questID, t.startEvent, nil, t.isOnMap, t.hasLocalPOI, t.isTask, t.isStory
 	end
 end
 

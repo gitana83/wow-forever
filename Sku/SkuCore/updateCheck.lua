@@ -163,7 +163,7 @@ local function MaybeAnnounceVersion()
   if cid == 0 then return end                -- not on the channel; nothing to do
   if not (C_ChatInfo and C_ChatInfo.SendAddonMessage) then return end
 
-  C_ChatInfo.SendAddonMessage(COMM_PREFIX, GetOwnVersionString(), "CHANNEL", cid)
+  C_ChatInfo.SendAddonMessage(COMM_PREFIX, (Sku.isForever and "forever|" or "")..GetOwnVersionString(), "CHANNEL", cid)
   _lastSentAt = Now()
   _heardConsistent = 0
   Trace("sent own version", GetOwnVersionString(), "to channel id", cid)
@@ -185,6 +185,10 @@ end
 local function OnPeerVersion(peerVersion)
   if not UpdateCheck:IsEnabled() then return end
   if type(peerVersion) ~= "string" or peerVersion == "" then return end
+  -- Forever has its own version series; only compare within the same flavor.
+  local tPeerIsForever = peerVersion:sub(1, 8) == "forever|"
+  if tPeerIsForever then peerVersion = peerVersion:sub(9) end
+  if tPeerIsForever ~= (Sku.isForever == true) then return end
   local cmp = CompareVersions(peerVersion, GetOwnVersionString())
   Trace("heard peer version", peerVersion, "cmp", cmp, "consistentSoFar", _heardConsistent)
 
