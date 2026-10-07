@@ -969,9 +969,8 @@ local function GetInstanceEntranceWps(aAreaId)
 			local _, tParentName, tContinentID = SkuNav.Geo:GetAreaData(tE[1])
 			local tUiMapId = SkuNav.Geo:GetUiMapIdFromAreaId(tE[1])
 			if tParentName and tUiMapId and tContinentID then
-				local _, tWorldPos = C_Map.GetWorldPosFromMapPos(tUiMapId, CreateVector2D(tE[2] / 100, tE[3] / 100))
-				if tWorldPos then
-					local tWorldX, tWorldY = tWorldPos:GetXY()
+				local tWorldX, tWorldY = SkuNav:WorldFromMap(tUiMapId, tE[2] / 100, tE[3] / 100)
+				if tWorldX then
 					local tWp = SkuNav:GetNearestWpToCoords2(tWorldX, tWorldY, tContinentID, 1)
 					if tWp then
 						tOut[#tOut + 1] = {wp = tWp, dungeonName = tDungeonName, parentName = tParentName, continentId = tContinentID, uiMapId = tUiMapId}
@@ -1736,9 +1735,8 @@ function SkuQuest:GetTriggerEndWps(aQuestId)
 				if not SkuNav:GetWaypointData2(tName) then
 					tName = nil
 					if tUiMapId and tContinentID then
-						local _, tWorldPos = C_Map.GetWorldPosFromMapPos(tUiMapId, CreateVector2D(tX / 100, tY / 100))
-						if tWorldPos then
-							local tWorldX, tWorldY = tWorldPos:GetXY()
+						local tWorldX, tWorldY = SkuNav:WorldFromMap(tUiMapId, tX / 100, tY / 100)
+						if tWorldX then
 							tName = SkuNav:GetNearestWpToCoords2(tWorldX, tWorldY, tContinentID, 1)
 						end
 					end
@@ -2405,8 +2403,7 @@ function SkuQuest:GetUnsortedAvailableQuestsTable()
 				if SkuDB.NpcData.Data[tQuestGiverID][SkuDB.NpcData.Keys["spawns"]][tUiMap] then
 					local tSpawnX, tSpawnY = SkuDB.NpcData.Data[tQuestGiverID][SkuDB.NpcData.Keys["spawns"]][tUiMap][1][1], SkuDB.NpcData.Data[tQuestGiverID][SkuDB.NpcData.Keys["spawns"]][tUiMap][1][2]
 					if tSpawnX ~= -1 and tSpawnY ~= -1 then
-						local _, worldPosition = C_Map.GetWorldPosFromMapPos(SkuNav.Geo:GetUiMapIdFromAreaId(tUiMap), CreateVector2D(tonumber(tSpawnX) / 100, tonumber(tSpawnY) / 100))
-						local tX, tY = worldPosition:GetXY()
+						local tX, tY = SkuNav:WorldFromMap(SkuNav.Geo:GetUiMapIdFromAreaId(tUiMap), tonumber(tSpawnX) / 100, tonumber(tSpawnY) / 100)
 						local tDistance, _  = SkuNav.Geo:Distance(tPlayX, tPlayY, tX, tY)
 						-- UnitPosition("player") is nil in instances/raids/BGs, so Distance()
 						-- returns nil there; keep listing the quest, sorted to the end.
@@ -2424,8 +2421,7 @@ function SkuQuest:GetUnsortedAvailableQuestsTable()
 				if tObjectSpawns[tUiMap] then
 					local tSpawnX, tSpawnY = tObjectSpawns[tUiMap][1][1], tObjectSpawns[tUiMap][1][2]
 					if tSpawnX ~= -1 and tSpawnY ~= -1 then
-						local _, worldPosition = C_Map.GetWorldPosFromMapPos(SkuNav.Geo:GetUiMapIdFromAreaId(tUiMap), CreateVector2D(tonumber(tSpawnX) / 100, tonumber(tSpawnY) / 100))
-						local tX, tY = worldPosition:GetXY()
+						local tX, tY = SkuNav:WorldFromMap(SkuNav.Geo:GetUiMapIdFromAreaId(tUiMap), tonumber(tSpawnX) / 100, tonumber(tSpawnY) / 100)
 						local tDistance, _  = SkuNav.Geo:Distance(tPlayX, tPlayY, tX, tY)
 						-- UnitPosition("player") is nil in instances/raids/BGs, so Distance()
 						-- returns nil there; keep listing the quest, sorted to the end.
@@ -2509,6 +2505,9 @@ function SkuQuest:MenuBuilder(aParentEntry)
 				end
 				if frequency == 2 then
 					tAddTitle = tAddTitle..L["(Daily) "]
+				end
+				if isHeader == false and level and level > 0 then
+					tAddTitle = tAddTitle..L["Level"].." "..level.." "
 				end
 				if isHeader == false then
 					-- [WoW Forever/Camelot fix] Was storing questLogID here -- the

@@ -2288,32 +2288,32 @@ function SkuChat_DisplayLevelUp(self, level, ...)
 	end
 	self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 
-	if ( arg4 > 0 ) then
+	if ( (arg4 or 0) > 0 ) then
 		string = format(GetText("LEVEL_UP_CHAR_POINTS", nil, arg4), arg4) 
 		self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 	end
 
-	if ( arg5 > 0 ) then
+	if ( (arg5 or 0) > 0 ) then
 		string = format(LEVEL_UP_STAT, SPELL_STAT1_NAME, arg5) 
 		self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 	end
 
-	if ( arg6 > 0 ) then
+	if ( (arg6 or 0) > 0 ) then
 		string = format(LEVEL_UP_STAT, SPELL_STAT2_NAME, arg6) 
 		self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 	end
 
-	if ( arg7 > 0 ) then
+	if ( (arg7 or 0) > 0 ) then
 		string = format(LEVEL_UP_STAT, SPELL_STAT3_NAME, arg7) 
 		self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 	end
 
-	if ( arg8 > 0 ) then
+	if ( (arg8 or 0) > 0 ) then
 		string = format(LEVEL_UP_STAT, SPELL_STAT4_NAME, arg8) 
 		self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 	end
 
-	if ( arg9 > 0 ) then
+	if ( (arg9 or 0) > 0 ) then
 		string = format(LEVEL_UP_STAT, SPELL_STAT5_NAME, arg9) 
 		self:AddMessage(tMessagetype, string, info.r, info.g, info.b, info.id) 
 	end

@@ -134,6 +134,16 @@ function SkuCore:ReadProfessionsList()
 	if not C then return tList end
 	local tOk, tIds = pcall(C.GetFilteredRecipeIDs)
 	if not tOk or type(tIds) ~= "table" then return tList end
+	-- WoW Forever/Camelot: for some professions (Kuerschnerei: "Sonnen") GetFilteredRecipeIDs
+	-- liefert 0, obwohl GetAllRecipeIDs die Rezepte kennt (Blizzards Fenster-Filter greift, bevor
+	-- die Liste da ist). Dann alle Rezepte nehmen; unten bleiben ohnehin nur gelernte uebrig.
+	if #tIds == 0 and C.GetAllRecipeIDs then
+		local tOkA, tAll = pcall(C.GetAllRecipeIDs)
+		if tOkA and type(tAll) == "table" and #tAll > 0 then
+			dprint("ProfList", "gefiltert 0, nehme alle Rezepte", #tAll)
+			tIds = tAll
+		end
+	end
 
 	local tGroups, tOrder = {}, {}
 	for _, tId in ipairs(tIds) do

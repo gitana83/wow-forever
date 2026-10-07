@@ -1,4 +1,4 @@
-﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local MODULE_NAME = "SkuOptions"
@@ -1362,11 +1362,15 @@ function SkuOptions:UpdateOverviewText(aPageId)
 	--pet
 	if UnitName("playerpet") and SkuCore:PlayerIsHunter() then
 		local petSection = L["Pet"]
-		local tPetcurrXP, tPetnextXP = GetPetExperience() --current XP total; XP total required for the next level
-		if tPetcurrXP then
+		local tPetcurrXP, tPetnextXP
+		if _G.GetPetExperience then
+			local tOkXp, tCur, tNext = pcall(_G.GetPetExperience) --current XP total; XP total required for the next level
+			if tOkXp then tPetcurrXP, tPetnextXP = tCur, tNext end
+		end
+		if tPetcurrXP and tPetnextXP then
 			petSection = petSection .. "\r\n" .. L["Tier XP: "] .. tPetcurrXP .. L[" von "] .. tPetnextXP .. L[" für "] .. UnitLevel("playerpet") + 1
 		end
-		local happiness = GetPetHappiness()
+		local happiness = SkuCore:GetPetHappinessSafe()
 		if happiness then
 			petSection = petSection .. "\r\n"..L["Pet happiness"]..": "..SkuCore.PetHappinessString[happiness]
 		end
@@ -1374,12 +1378,19 @@ function SkuOptions:UpdateOverviewText(aPageId)
 		-- [Fix Nr13] In TBC (2.5.6) haben Pets keine Talentpunkte (erst WotLK),
 		-- UnitCharacterPoints("pet") liefert daher 0. Jaeger-Pets nutzen hier
 		-- Trainingspunkte: frei = gesamt - vergeben.
-		if GetPetTrainingPoints then
-			local tTotal, tSpent = GetPetTrainingPoints()
-			local tUnspent = (tTotal or 0) - (tSpent or 0)
-			petSection = petSection .. "\r\n" .. L["Unspent pet training points"]..": "..tUnspent
-		elseif UnitCharacterPoints("pet") then
-			petSection = petSection .. "\r\n" .. L["Unspent pet talent points"]..": "..UnitCharacterPoints("pet")
+		-- [Forever] Weder GetPetTrainingPoints noch UnitCharacterPoints gibt es dort: der Aufruf von nil brach die
+		-- GANZE Uebersicht ab (nichts mehr auf Shift-Strg-Pfeil). Jeder Zweig ist jetzt vorhanden-geprueft.
+		if _G.GetPetTrainingPoints then
+			local tOkTp, tTotal, tSpent = pcall(_G.GetPetTrainingPoints)
+			if tOkTp then
+				local tUnspent = (tTotal or 0) - (tSpent or 0)
+				petSection = petSection .. "\r\n" .. L["Unspent pet training points"]..": "..tUnspent
+			end
+		elseif _G.UnitCharacterPoints then
+			local tOkCp, tPoints = pcall(_G.UnitCharacterPoints, "pet")
+			if tOkCp and tPoints then
+				petSection = petSection .. "\r\n" .. L["Unspent pet talent points"]..": "..tPoints
+			end
 		end
 
 		if SkuSettings:Sub("SkuOptions").overviewPages[aPageId].overviewSections["pet"].pos ~= 999 then
@@ -2591,6 +2602,7 @@ function SkuOptions:CreateMainFrame()
 					--["GameMenuFrame"] = "GameMenuButtonContinue",
 					["CharacterFrame"] = "CharacterFrameCloseButton",
 					["PlayerTalentFrame"] = "PlayerTalentFrameCloseButton",
+					["PlayerSpellsFrame"] = "PlayerSpellsFrameCloseButton",
 					["MerchantFrame"] = "MerchantFrameCloseButton",
 					["GossipFrame"] = "GossipFrameCloseButton",
 					["ClassTrainerFrame"] = "ClassTrainerFrameCloseButton",
@@ -2661,7 +2673,16 @@ function SkuOptions:CreateMainFrame()
 									dprint("menuClose click", v, "->", tostring(tExclude[v]),
 										"exists", tBtn and 1 or 0,
 										"enabled", ((tBtn and tBtn.IsEnabled and tBtn:IsEnabled()) and 1 or 0))
-									tBtn:Click()
+									-- Forever: TaxiFrame hat keinen TaxiCloseButton mehr, der Schliessen-Knopf
+									-- kommt aus BasicFrameTemplateWithInset (.CloseButton).
+									if not tBtn and _G[v].CloseButton then tBtn = _G[v].CloseButton end
+									if tBtn then
+										tBtn:Click()
+									elseif _G.HideUIPanel then
+										pcall(_G.HideUIPanel, _G[v])
+									else
+										_G[v]:Hide()
+									end
 								end
 							end
 						end
@@ -3980,7 +4001,14 @@ function SkuOptions:CreateMenuFrame()
 			_G["QuestFrameGoodbyeButton"]:GetScript("OnClick")(_G["QuestFrameGoodbyeButton"])
 		end
 		if _G["TaxiFrame"]:IsVisible() == true then
-			_G["TaxiCloseButton"]:GetScript("OnClick")(_G["TaxiCloseButton"])
+			local tTaxiClose = _G["TaxiCloseButton"] or _G["TaxiFrame"].CloseButton
+			if tTaxiClose then
+				tTaxiClose:Click()
+			elseif _G.HideUIPanel then
+				pcall(_G.HideUIPanel, _G["TaxiFrame"])
+			else
+				_G["TaxiFrame"]:Hide()
+			end
 			--_G["TaxiFrame"]:Hide()
 		end
 		if _G["StaticPopup1"]:IsVisible() == true then
@@ -4515,6 +4543,27 @@ function SkuOptions:OnInitialize()
 		end
 	end)
 	SkuOptions.db = LibStub("AceDB-3.0"):New("SkuOptionsDB", defaults, true)
+	-- AceDB fixes its character key when the library loads, which can be a
+	-- spelling the pre-pass above never saw (e.g. name + surname). That key then
+	-- has no profile (-> "Default") and no char table (-> "first login", which
+	-- Sku answers by switching to "Standard profil Allgemein"). Point it at the
+	-- stable key's profile and char table, as long as db.char is not touched yet.
+	pcall(function()
+		local tSv = SkuOptions.db.sv
+		local tRealm = GetRealmName()
+		if not (tSv.stableCharName and tRealm) then return end
+		local tStableKey = tSv.stableCharName .. " - " .. tRealm
+		local tActualKey = SkuOptions.db.keys.char
+		local tStableProfile = tSv.profileKeys and tSv.profileKeys[tStableKey]
+		if tActualKey == tStableKey or not tStableProfile then return end
+		tSv.char = tSv.char or {}
+		if type(tSv.char[tStableKey]) == "table" and rawget(SkuOptions.db, "char") == nil then
+			tSv.char[tActualKey] = tSv.char[tStableKey]
+		end
+		if SkuOptions.db:GetCurrentProfile() ~= tStableProfile then
+			SkuOptions.db:SetProfile(tStableProfile)
+		end
+	end)
 	-- [v43.5] The BTTS cache-buster counters live in the global section so a
 	-- /reload continues them: the client's TTS audio cache survives a reload,
 	-- and a counter that restarted let a revisited line land back on an

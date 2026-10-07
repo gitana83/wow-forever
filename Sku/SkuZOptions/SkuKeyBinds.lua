@@ -217,6 +217,7 @@ SkuOptions.skuDefaultKeyBindings = {
    -- ALT-H als Vorgabe: frei (kein anderer Sku-Const und keine Standardbelegung
    -- des Spiels liegt darauf), und ohne Vorgabe entdeckt die Funktion niemand.
    ["SKU_KEY_QUESTTARGET"] = {key = "ALT-H", object = "SkuQuest", func = "UpdateQuestTargetBinding",},
+   ["SKU_KEY_PETHEALTH"] = {key = "CTRL-SHIFT-K", object = "SkuCore", func = "UpdatePetHealthBinding",},
 
    ["SKU_KEY_TARGETHEALTH"] = {key = "", object = "SkuCoreControlOption1", script = "OnHide",},
 

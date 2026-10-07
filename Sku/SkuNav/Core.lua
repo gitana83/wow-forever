@@ -677,12 +677,22 @@ local function tWpcWorldFromMap(aUiMapId, aRelX, aRelY)
 		t = tWpcDeriveTransform(aUiMapId)
 		local tKnown = tWpcKnownTransform[aUiMapId]
 		if tKnown then
-			local tKx = tKnown[1] + (tKnown[2] + tKnown[3]) * 0.5
-			local tKy = tKnown[4] + (tKnown[5] + tKnown[6]) * 0.5
-			local tCx, tCy = tWpcProbe(aUiMapId, 0.5, 0.5)
-			if not tCx or math.abs(tCx - tKx) > 2 or math.abs(tCy - tKy) > 2 then
-				dprint("WpcTransform: client map", aUiMapId, "weicht ab, centre client",
-					tCx and string.format("%.1f/%.1f", tCx, tCy) or "nil", "bekannt", string.format("%.1f/%.1f", tKx, tKy), "-> bekannte Transformation")
+			-- Mitte UND vier Ecken pruefen: stimmt nur die Mitte, weicht aber der
+			-- Massstab ab, blieb die Abweichung bisher unentdeckt.
+			local tDeviates, tInfo = false, "nil"
+			for _, tP in ipairs({{0.5, 0.5}, {0, 0}, {1, 0}, {0, 1}, {1, 1}}) do
+				local tKx = tKnown[1] + tKnown[2] * tP[1] + tKnown[3] * tP[2]
+				local tKy = tKnown[4] + tKnown[5] * tP[1] + tKnown[6] * tP[2]
+				local tCx, tCy = tWpcProbe(aUiMapId, tP[1], tP[2])
+				if not tCx or math.abs(tCx - tKx) > 2 or math.abs(tCy - tKy) > 2 then
+					tDeviates = true
+					tInfo = string.format("%.2f/%.2f client %s bekannt %.1f/%.1f", tP[1], tP[2],
+						tCx and string.format("%.1f/%.1f", tCx, tCy) or "nil", tKx, tKy)
+					break
+				end
+			end
+			if tDeviates then
+				dprint("WpcTransform: client map", aUiMapId, "weicht ab,", tInfo, "-> bekannte Transformation")
 				t = tKnown
 			end
 		end
@@ -692,6 +702,16 @@ local function tWpcWorldFromMap(aUiMapId, aRelX, aRelY)
 		return tWpcProbe(aUiMapId, aRelX, aRelY)
 	end
 	return t[1] + t[2] * aRelX + t[3] * aRelY, t[4] + t[5] * aRelX + t[6] * aRelY
+end
+
+-- Oeffentlich: Karte (0..1) -> Welt (x, y), mit der Forever-Korrektur. ALLE Stellen, die
+-- Prozent-Koordinaten in Weltkoordinaten umrechnen, muessen hierueber gehen, nicht ueber
+-- C_Map.GetWorldPosFromMapPos direkt. nil, wenn die Karte keine Weltposition liefert.
+function SkuNav:WorldFromMap(aUiMapId, aRelX, aRelY)
+	if not (aUiMapId and aRelX and aRelY) then return nil end
+	local tOk, tX, tY = pcall(tWpcWorldFromMap, aUiMapId, aRelX, aRelY)
+	if tOk and tX and tY then return tX, tY end
+	return nil
 end
 
 function SkuNav:CreateWaypointCache(aAddLocalizedNames, aAsync)
@@ -2555,9 +2575,10 @@ function SkuNav:ProcessPlayerDead()
 		return
 	end
 	local cX, cY = tCorpse:GetXY()
-	local tmapPos = CreateVector2D(cX, cY)
-	local _, worldPosition = C_Map.GetWorldPosFromMapPos(SkuNav:GetBestMapForUnit("player"), tmapPos)
-	local tX, tY = worldPosition:GetXY()
+	local tX, tY = SkuNav:WorldFromMap(SkuNav:GetBestMapForUnit("player"), cX, cY)
+	if not tX then
+		return
+	end
 
 	local tPlayerx, tPlayery = UnitPosition("player")
 	local distance = SkuNav:Distance(tPlayerx, tPlayery, tX, tY)

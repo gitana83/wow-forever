@@ -64,6 +64,98 @@ local function tMoneyText(aCopper)
 	return tostring(aCopper).." Kupfer"
 end
 
+-- Shared small helpers (used by browse, detail, bids, sell and own auctions below).
+local function tSay(aText)
+	pcall(function() SkuOptions.Voice:OutputStringBTtts(aText, false, true, 0.2) end)
+end
+
+local function tHours(aN)
+	return aN.." "..Sku.deEn("Stunden", "hours", "heures")
+end
+
+-- Time left of an auction: exact seconds when the server sends them, else Blizzard's band
+-- (AuctionHouseTimeLeftBand 0..3: short .. very long).
+local function tTimeLeftText(aInfo)
+	local tSec = aInfo.timeLeftSeconds
+	if tSec and tSec > 0 then
+		if tSec >= 3600 then return tHours(math.floor(tSec / 3600 + 0.5)) end
+		return math.max(1, math.floor(tSec / 60 + 0.5)).." "..Sku.deEn("Minuten", "minutes", "minutes")
+	end
+	local tBand = aInfo.timeLeft
+	if tBand ~= nil then
+		return ({
+			[0] = Sku.deEn("unter 30 Minuten", "under 30 minutes", "moins de 30 minutes"),
+			[1] = Sku.deEn("unter 2 Stunden", "under 2 hours", "moins de 2 heures"),
+			[2] = Sku.deEn("unter 12 Stunden", "under 12 hours", "moins de 12 heures"),
+			[3] = Sku.deEn("über 12 Stunden", "over 12 hours", "plus de 12 heures"),
+		})[tBand] or ""
+	end
+	return ""
+end
+
+-- A menu leaf that changes something in place (value toggles, "load more", ...).
+local function tSettingLeaf(aParent, aName, aOnAction)
+	local tE = SkuOptions:InjectMenuItems(aParent, {aName}, SkuGenericMenuItem)
+	tE.dynamic = false
+	tE.actionInPlace = true
+	tE.OnAction = aOnAction
+	return tE
+end
+
+local function tIsOwnGuid(aGuid)
+	return aGuid ~= nil and aGuid == UnitGUID("player")
+end
+
+local function tVocalize()
+	pcall(function() SkuOptions:VocalizeCurrentMenuName() end)
+end
+
+-- "12g 5s 3k", "12 gold 5 silber", "1.5" (= 1g 50s), plain number = gold
+local function tParseMoney(aText)
+	if type(aText) ~= "string" then return nil end
+	local tS = aText:lower():gsub(",", "."):gsub("^%s+", ""):gsub("%s+$", "")
+	if tS == "" then return nil end
+	local tPlain = tonumber(tS)
+	local tTotal
+	if tPlain then
+		tTotal = math.floor(tPlain * 10000 + 0.5)
+	else
+		tTotal = 0
+		for tNum, tUnit in tS:gmatch("(%d+)%s*(%a*)") do
+			local tC = tUnit:sub(1, 1)
+			local tN = tonumber(tNum)
+			if tC == "g" then tTotal = tTotal + tN * 10000
+			elseif tC == "s" then tTotal = tTotal + tN * 100
+			elseif tC == "k" or tC == "c" then tTotal = tTotal + tN end
+		end
+	end
+	if not tTotal or tTotal <= 0 then return nil end
+	local tOk, tCopper = pcall(C_AuctionHouse.SupportsCopperValues)
+	if tOk and not tCopper then tTotal = math.max(100, math.floor(tTotal / 100 + 0.5) * 100) end
+	return tTotal
+end
+
+-- Asks for a money amount in the edit box ("12g 5s 3k", "1.5" = 1 gold 50 silver) and hands the
+-- parsed copper value to aApply. Only the answer is read here - anything protected (bids,
+-- buying, posting) happens afterwards in a separate menu action from a real key press.
+local function tAskMoney(aPrompt, aApply)
+	SkuOptions:EditBoxShow("", function()
+		local tText = SkuOptionsEditBoxEditBox:GetText()
+		if tText and tText ~= "" then
+			local tAmount = tParseMoney(tText)
+			if tAmount then
+				aApply(tAmount)
+			else
+				tSay(Sku.deEn("Betrag nicht verstanden", "Amount not understood", "Montant non compris"))
+			end
+		end
+		tVocalize()
+	end, nil)
+	C_Timer.After(0.1, function()
+		SkuOptions.Voice:OutputStringBTtts(aPrompt, true, true, 0.1, nil, nil, nil, 1)
+	end)
+end
+
 -- ---------------------------------------------------------------------
 -- Rebuild-in-place helper for an async server response arriving while the
 -- user is sitting inside a dynamic node (search results, item detail).
@@ -90,7 +182,13 @@ local function tRebuildAndFocus(aEntry, aForce)
 	pcall(function() SkuOptions:RebuildNodeChildren(aEntry, true) end)
 	if aEntry.children and aEntry.children[1] and SkuOptions
 		and (aForce or tCursorWasHere) then
-		SkuOptions.currentMenuPosition = aEntry.children[1]
+		-- A child flagged ahfPrimary (e.g. the first listing, behind a favourite toggle) gets the
+		-- cursor instead of children[1].
+		local tTarget = aEntry.children[1]
+		for _, tChild in ipairs(aEntry.children) do
+			if tChild.ahfPrimary then tTarget = tChild break end
+		end
+		SkuOptions.currentMenuPosition = tTarget
 		if SkuOptions.VocalizeCurrentMenuName then pcall(function() SkuOptions:VocalizeCurrentMenuName() end) end
 	end
 end
@@ -117,14 +215,17 @@ end
 -- sets itemClassFilters with an empty searchString. Same result shape, same
 -- state, same result-list UI either way.)
 -- ---------------------------------------------------------------------
-function AHF:StartBrowseQuery(aQuery, aEntry)
+-- aSend (optional): replaces the plain SendBrowseQuery call, e.g. SearchForFavorites - the
+-- answer arrives through the same browse events and is read the same way.
+function AHF:StartBrowseQuery(aQuery, aEntry, aSend)
 	dprint("ahfDiag StartBrowseQuery", aEntry and aEntry.name, "filters", aQuery.itemClassFilters and #aQuery.itemClassFilters or 0)
 	gBrowse.state = "waiting"
 	gBrowse.results = {}
+	gBrowse.focusIndex = nil
 	gBrowse.entry = aEntry
 	gBrowse.generation = (gBrowse.generation or 0) + 1
 	local tGen = gBrowse.generation
-	local tOk = pcall(C_AuctionHouse.SendBrowseQuery, aQuery)
+	local tOk = pcall(aSend or C_AuctionHouse.SendBrowseQuery, aQuery)
 	if not tOk then
 		gBrowse.state = "done"
 		return
@@ -146,6 +247,14 @@ end
 
 function AHF:StartBrowse(aSearchText, aEntry)
 	AHF:StartBrowseQuery({ searchString = aSearchText, sorts = {} }, aEntry)
+end
+
+-- The player's favourite items (Blizzard: the star in the search bar). Same result shape as a
+-- name search, so it feeds the same list.
+function AHF:StartFavorites(aEntry)
+	AHF:StartBrowseQuery({ sorts = {} }, aEntry, function(aQuery)
+		return C_AuctionHouse.SearchForFavorites(aQuery.sorts)
+	end)
 end
 
 -- aFilters: one category's accumulated {classID, subClassID, inventoryType}
@@ -196,6 +305,7 @@ function AHF:RefreshBrowseResults()
 		tDepth = tDepth + 1
 	end
 	if not (tPos and tPos == gBrowse.entry and tDepth >= 2) then tRebuildAndFocus(gBrowse.entry) end
+	gBrowse.focusIndex = nil
 end
 
 -- ---------------------------------------------------------------------
@@ -204,6 +314,7 @@ end
 function AHF:StartDetail(aRow, aEntry)
 	gDetail.state = "waiting"
 	gDetail.itemKey = aRow.itemKey
+	gDetail.focusIndex = nil
 	gDetail.isCommodity = aRow.isCommodity
 	gDetail.name = aRow.name
 	gDetail.results = {}
@@ -236,6 +347,8 @@ function AHF:RefreshDetailResults(aItemID)
 						itemID = gDetail.itemKey.itemID,
 						unitPrice = tResult.unitPrice,
 						quantity = tResult.quantity,
+						timeLeftSeconds = tResult.timeLeftSeconds,
+						isOwn = tResult.containsOwnerItem,
 					}
 				end
 			end
@@ -253,6 +366,11 @@ function AHF:RefreshDetailResults(aItemID)
 						buyoutAmount = tResult.buyoutAmount,
 						bidAmount = tResult.bidAmount,
 						minBid = tResult.minBid,
+						timeLeft = tResult.timeLeft,
+						timeLeftSeconds = tResult.timeLeftSeconds,
+						bidder = tResult.bidder,
+						itemLink = tResult.itemLink,
+						isOwn = tResult.containsOwnerItem,
 					}
 				end
 			end
@@ -261,6 +379,7 @@ function AHF:RefreshDetailResults(aItemID)
 	gDetail.results = tRows
 	gDetail.state = "done"
 	tRebuildAndFocus(gDetail.entry)
+	gDetail.focusIndex = nil
 end
 
 -- ---------------------------------------------------------------------
@@ -269,8 +388,12 @@ end
 -- requirement the legacy module's buy path already relies on elsewhere.
 -- ---------------------------------------------------------------------
 function AHF:BuyItemAuction(aAuctionID, aBuyoutAmount, aName)
-	local tOk, tErr = pcall(C_AuctionHouse.PlaceBid, aAuctionID, aBuyoutAmount)
 	local tNamePrefix = aName and (aName..": ") or ""
+	if (GetMoney() or 0) < (aBuyoutAmount or 0) then
+		tSay(tNamePrefix..Sku.deEn("Nicht genug Geld", "Not enough money", "Pas assez d'argent"))
+		return
+	end
+	local tOk, tErr = pcall(C_AuctionHouse.PlaceBid, aAuctionID, aBuyoutAmount)
 	if tOk then
 		pcall(function() SkuOptions.Voice:OutputStringBTtts(tNamePrefix..Sku.deEn("Kauf ausgelöst", "Purchase started", "Achat lancé"), false, true, 0.2) end)
 	else
@@ -344,7 +467,9 @@ gEventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
 gEventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_FAILURE")
 gEventFrame:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
 gEventFrame:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
+gEventFrame:RegisterEvent("ITEM_SEARCH_RESULTS_ADDED")
 gEventFrame:RegisterEvent("COMMODITY_SEARCH_RESULTS_UPDATED")
+gEventFrame:RegisterEvent("COMMODITY_SEARCH_RESULTS_ADDED")
 gEventFrame:RegisterEvent("COMMODITY_PRICE_UPDATED")
 gEventFrame:RegisterEvent("COMMODITY_PRICE_UNAVAILABLE")
 gEventFrame:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
@@ -365,11 +490,14 @@ gEventFrame:SetScript("OnEvent", function(self, aEvent, ...)
 			tRebuildAndFocus(gBrowse.entry)
 		elseif aEvent == "ITEM_KEY_ITEM_INFO_RECEIVED" then
 			if gBrowse.state == "waiting" then AHF:RefreshBrowseResults() end
-		elseif aEvent == "ITEM_SEARCH_RESULTS_UPDATED" then
+		elseif aEvent == "ITEM_SEARCH_RESULTS_UPDATED" or aEvent == "ITEM_SEARCH_RESULTS_ADDED" then
 			local tKey = ...
-			AHF:RefreshDetailResults(type(tKey) == "table" and tKey.itemID or nil)
-		elseif aEvent == "COMMODITY_SEARCH_RESULTS_UPDATED" then
+			local tItemID = type(tKey) == "table" and tKey.itemID or nil
+			AHF:RefreshDetailResults(tItemID)
+			if AHF.OnSellMarketResult then AHF:OnSellMarketResult(false, tItemID) end
+		elseif aEvent == "COMMODITY_SEARCH_RESULTS_UPDATED" or aEvent == "COMMODITY_SEARCH_RESULTS_ADDED" then
 			AHF:RefreshDetailResults((...))
+			if AHF.OnSellMarketResult then AHF:OnSellMarketResult(true, (...)) end
 		elseif aEvent == "COMMODITY_PRICE_UPDATED" then
 			AHF:OnCommodityPriceUpdated(...)
 		elseif aEvent == "COMMODITY_PRICE_UNAVAILABLE" then
@@ -428,6 +556,112 @@ local function tBuildCommodityConfirmChildren(aParentEntry)
 	end
 end
 
+-- Bid on a regular auction. A bid at or above the buyout price is a buyout (Blizzard's own
+-- bid dialog does the same). Runs inside a menu action, i.e. from a real key press.
+function AHF:PlaceItemBid(aRow, aAmount, aName)
+	local tPrefix = aName and (aName..": ") or ""
+	if aRow.isOwn then
+		tSay(tPrefix..Sku.deEn("Das ist dein eigenes Angebot", "That is your own auction", "C'est votre propre enchère"))
+		return
+	end
+	if aRow.buyoutAmount and aRow.buyoutAmount > 0 and aAmount >= aRow.buyoutAmount then
+		AHF:BuyItemAuction(aRow.auctionID, aRow.buyoutAmount, aName)
+		return
+	end
+	if aRow.minBid and aAmount < aRow.minBid then
+		tSay(tPrefix..Sku.deEn("Das Gebot ist zu niedrig, mindestens ", "The bid is too low, at least ", "L'enchère est trop basse, au moins ")..tMoneyText(aRow.minBid))
+		return
+	end
+	if (GetMoney() or 0) < aAmount then
+		tSay(tPrefix..Sku.deEn("Nicht genug Geld", "Not enough money", "Pas assez d'argent"))
+		return
+	end
+	local tOk = pcall(C_AuctionHouse.PlaceBid, aRow.auctionID, aAmount)
+	tSay(tPrefix..(tOk and (Sku.deEn("Gebot ausgelöst: ", "Bid sent: ", "Enchère envoyée : ")..tMoneyText(aAmount))
+		or Sku.deEn("Gebot fehlgeschlagen", "Bid failed", "Échec de l'enchère")))
+end
+
+-- The three bid leaves shared by the item detail and "Meine Gebote": bid the minimum, set an
+-- own amount, place that amount. Setting and placing are separate leaves so the protected
+-- PlaceBid always runs from its own real key press. aData: {auctionID, minBid, buyoutAmount,
+-- isOwn, customBid}. Returns true when bidding is possible at all.
+local function tAddBidLeaves(aParent, aData, aName)
+	if not (aData.minBid and aData.minBid > 0) then return false end
+	local tBidMin = SkuOptions:InjectMenuItems(aParent, {Sku.deEn("Mindestgebot bieten: ", "Bid the minimum: ", "Enchérir le minimum : ")..tMoneyText(aData.minBid)}, SkuGenericMenuItem)
+	tBidMin.dynamic = false
+	tBidMin.OnAction = function()
+		AHF:PlaceItemBid(aData, aData.minBid, aName)
+	end
+	local tCustomPlace
+	tSettingLeaf(aParent, Sku.deEn("Eigenes Gebot festlegen", "Set your own bid", "Fixer votre propre enchère"), function()
+		tAskMoney(Sku.deEn("Gebot eingeben, zum Beispiel 12g 5s 3k", "Enter bid, for example 12g 5s 3k", "Entrez l'enchère, par exemple 12g 5s 3k"), function(aAmount)
+			aData.customBid = aAmount
+			if tCustomPlace then
+				tCustomPlace.name = Sku.deEn("Eigenes Gebot abgeben: ", "Place your bid: ", "Placer votre enchère : ")..tMoneyText(aAmount)
+			end
+		end)
+	end)
+	tCustomPlace = tSettingLeaf(aParent, aData.customBid
+		and (Sku.deEn("Eigenes Gebot abgeben: ", "Place your bid: ", "Placer votre enchère : ")..tMoneyText(aData.customBid))
+		or Sku.deEn("Eigenes Gebot abgeben, erst festlegen", "Place your bid, set it first", "Placer votre enchère, d'abord la fixer"),
+		function()
+			if not aData.customBid then
+				tSay(Sku.deEn("Erst ein Gebot festlegen", "Set a bid first", "Fixez d'abord une enchère"))
+				return
+			end
+			AHF:PlaceItemBid(aData, aData.customBid, aName)
+		end)
+	return true
+end
+
+-- Favourites (Blizzard: the star next to an item). Only offered where the server supports them.
+local function tFavoritesAvailable()
+	local tOk, tAvail = pcall(C_AuctionHouse.FavoritesAreAvailable)
+	return tOk and tAvail == true
+end
+
+local function tIsFavorite(aItemKey)
+	local tOk, tIs = pcall(C_AuctionHouse.IsFavoriteItem, aItemKey)
+	return tOk and tIs == true
+end
+
+local function tFavoriteLabel(aItemKey)
+	if tIsFavorite(aItemKey) then
+		return Sku.deEn("Aus Favoriten entfernen", "Remove from favorites", "Retirer des favoris")
+	end
+	return Sku.deEn("Zu Favoriten hinzufügen", "Add to favorites", "Ajouter aux favoris")
+end
+
+local function tAddFavoriteLeaf(aParent, aItemKey)
+	if not aItemKey or not tFavoritesAvailable() then return end
+	tSettingLeaf(aParent, tFavoriteLabel(aItemKey), function(aLeaf)
+		local tFav = tIsFavorite(aItemKey)
+		if not tFav then
+			local tMaxOk, tMax = pcall(C_AuctionHouse.HasMaxFavorites)
+			if tMaxOk and tMax then
+				aLeaf.name = Sku.deEn("Die Favoritenliste ist voll", "Your favorites list is full", "Votre liste de favoris est pleine")
+				return
+			end
+		end
+		pcall(C_AuctionHouse.SetFavoriteItem, aItemKey, not tFav)
+		-- the server confirms with AUCTION_HOUSE_FAVORITES_UPDATED; show the expected state right away
+		aLeaf.name = (not tFav) and Sku.deEn("Zu Favoriten hinzugefügt", "Added to favorites", "Ajouté aux favoris")
+			or Sku.deEn("Aus Favoriten entfernt", "Removed from favorites", "Retiré des favoris")
+	end)
+end
+
+-- "Load more": the server hands out results in pages (HasFull*Results is false until all are in).
+local function tDetailIsComplete()
+	if not gDetail.itemKey then return true end
+	local tOk, tFull
+	if gDetail.isCommodity then
+		tOk, tFull = pcall(C_AuctionHouse.HasFullCommoditySearchResults, gDetail.itemKey.itemID)
+	else
+		tOk, tFull = pcall(C_AuctionHouse.HasFullItemSearchResults, gDetail.itemKey)
+	end
+	return (not tOk) or tFull ~= false
+end
+
 local function tBuildDetailChildren(aParentEntry)
 	aParentEntry.children = {}
 	if gDetail.state == "waiting" then
@@ -435,9 +669,11 @@ local function tBuildDetailChildren(aParentEntry)
 		tW.dynamic = false
 		return
 	end
+	tAddFavoriteLeaf(aParentEntry, gDetail.itemKey)
 	if #gDetail.results == 0 then
 		local tNone = SkuOptions:InjectMenuItems(aParentEntry, {L["AH_NoResults"]}, SkuGenericMenuItem)
 		tNone.dynamic = false
+		tNone.ahfPrimary = true
 		return
 	end
 	-- Every row repeats the item name (gDetail.name) - without it, a line like
@@ -445,6 +681,7 @@ local function tBuildDetailChildren(aParentEntry)
 	-- away and back, or the first time you land here at all. Confirmed live
 	-- 27.09.2026: Lena heard exactly that and couldn't tell what it referred to.
 	local tNamePrefix = (gDetail.name or "?")..": "
+	local tPrimaryIndex = gDetail.focusIndex or 1
 	for i, tRow in ipairs(gDetail.results) do
 		local tBody
 		if tRow.isCommodity then
@@ -453,11 +690,18 @@ local function tBuildDetailChildren(aParentEntry)
 			tBody = tRow.buyoutAmount and (Sku.deEn("Sofortkauf ", "Buyout ", "Achat immédiat ")..tMoneyText(tRow.buyoutAmount))
 				or (Sku.deEn("Gebot ab ", "Bid from ", "Enchère à partir de ")..tMoneyText(tRow.minBid or tRow.bidAmount or 0))
 			if tRow.quantity and tRow.quantity > 1 then tBody = tRow.quantity.."x "..tBody end
+			if tIsOwnGuid(tRow.bidder) then
+				tBody = tBody..", "..Sku.deEn("dein Gebot führt", "your bid is highest", "votre enchère est la plus haute")
+			end
 		end
+		local tLeft = tTimeLeftText(tRow)
+		if tLeft ~= "" then tBody = tBody..", "..Sku.deEn("noch ", "left: ", "reste ")..tLeft end
+		if tRow.isOwn then tBody = tBody..", "..Sku.deEn("dein eigenes Angebot", "your own auction", "votre propre enchère") end
 		local tLabel = tNamePrefix..tBody
 		local tRowEntry = SkuOptions:InjectMenuItems(aParentEntry, {tLabel}, SkuGenericMenuItem)
 		tRowEntry.dynamic = true
 		tRowEntry.data = tRow
+		if i == tPrimaryIndex then tRowEntry.ahfPrimary = true end
 		tRowEntry.BuildChildren = function(self)
 			self.children = {}
 			-- Post-quote confirm step takes over THIS row's children until the
@@ -474,17 +718,37 @@ local function tBuildDetailChildren(aParentEntry)
 					AHF:StartCommodityBuy(self.data.itemID, self.data.quantity, self, gDetail.name, self.data.index)
 					tRebuildAndFocus(self, true)
 				end
-			elseif self.data.buyoutAmount then
-				local tBuyEntry = SkuOptions:InjectMenuItems(self, {L["Kaufen"]}, SkuGenericMenuItem)
-				tBuyEntry.dynamic = false
-				tBuyEntry.OnAction = function()
-					AHF:BuyItemAuction(self.data.auctionID, self.data.buyoutAmount, gDetail.name)
-				end
+			elseif self.data.isOwn then
+				local tOwn = SkuOptions:InjectMenuItems(self, {Sku.deEn("Das ist dein eigenes Angebot", "That is your own auction", "C'est votre propre enchère")}, SkuGenericMenuItem)
+				tOwn.dynamic = false
 			else
-				local tNoBuyout = SkuOptions:InjectMenuItems(self, {Sku.deEn("Kein Sofortkauf möglich (nur Gebot)", "No buyout, bid only", "Pas d'achat immédiat, enchère seulement")}, SkuGenericMenuItem)
-				tNoBuyout.dynamic = false
+				local tData = self.data
+				if tData.buyoutAmount then
+					local tBuyEntry = SkuOptions:InjectMenuItems(self, {L["Kaufen"]..": "..tMoneyText(tData.buyoutAmount)}, SkuGenericMenuItem)
+					tBuyEntry.dynamic = false
+					tBuyEntry.OnAction = function()
+						AHF:BuyItemAuction(tData.auctionID, tData.buyoutAmount, gDetail.name)
+					end
+				end
+				-- Bidding below the buyout (Blizzard: the bid box next to the buyout button).
+				local tHasBid = tAddBidLeaves(self, tData, gDetail.name)
+				if not tData.buyoutAmount and not tHasBid then
+					local tNoBuyout = SkuOptions:InjectMenuItems(self, {Sku.deEn("Weder Sofortkauf noch Gebot möglich", "Neither buyout nor bid possible", "Ni achat immédiat ni enchère possible")}, SkuGenericMenuItem)
+					tNoBuyout.dynamic = false
+				end
 			end
 		end
+	end
+	if not tDetailIsComplete() then
+		tSettingLeaf(aParentEntry, Sku.deEn("Weitere Angebote laden, bisher ", "Load more auctions, so far ", "Charger plus d'offres, jusqu'ici ")..#gDetail.results, function(aLeaf)
+			gDetail.focusIndex = #gDetail.results + 1
+			if gDetail.isCommodity then
+				pcall(C_AuctionHouse.RequestMoreCommoditySearchResults, gDetail.itemKey.itemID)
+			else
+				pcall(C_AuctionHouse.RequestMoreItemSearchResults, gDetail.itemKey)
+			end
+			aLeaf.name = Sku.deEn("Weitere Angebote werden geladen", "Loading more auctions", "Chargement d'autres offres")
+		end)
 	end
 end
 
@@ -522,7 +786,17 @@ local function tAppendBrowseResultChildren(aParentEntry)
 			tNone.dynamic = false
 		else
 			for i, tRow in ipairs(gBrowse.results) do
-				tInjectItemRow(aParentEntry, tRow)
+				local tRowEntry = tInjectItemRow(aParentEntry, tRow)
+				if gBrowse.focusIndex and i == gBrowse.focusIndex then tRowEntry.ahfPrimary = true end
+			end
+			-- More results on the server (HasFullBrowseResults is false until all pages are in).
+			local tFullOk, tFull = pcall(C_AuctionHouse.HasFullBrowseResults)
+			if tFullOk and tFull == false then
+				tSettingLeaf(aParentEntry, Sku.deEn("Weitere Ergebnisse laden, bisher ", "Load more results, so far ", "Charger plus de résultats, jusqu'ici ")..#gBrowse.results, function(aLeaf)
+					gBrowse.focusIndex = #gBrowse.results + 1
+					pcall(C_AuctionHouse.RequestMoreBrowseResults)
+					aLeaf.name = Sku.deEn("Weitere Ergebnisse werden geladen", "Loading more results", "Chargement d'autres résultats")
+				end)
 			end
 		end
 	end
@@ -595,20 +869,8 @@ local gSell = { duration = nil }
 local gSellList = nil
 local gOwned = { state = "idle", rows = {}, entry = nil, generation = 0 }
 
-local function tSay(aText)
-	pcall(function() SkuOptions.Voice:OutputStringBTtts(aText, false, true, 0.2) end)
-end
-
 local function tPack(...)
 	return { n = select("#", ...), ... }
-end
-
-local function tVocalize()
-	pcall(function() SkuOptions:VocalizeCurrentMenuName() end)
-end
-
-local function tHours(aN)
-	return aN.." "..Sku.deEn("Stunden", "hours", "heures")
 end
 
 local function tDurationText(aIndex)
@@ -623,31 +885,6 @@ local function tGetDuration()
 		gSell.duration = math.max(1, math.min(3, tV))
 	end
 	return gSell.duration
-end
-
--- "12g 5s 3k", "12 gold 5 silber", "1.5" (= 1g 50s), plain number = gold
-local function tParseMoney(aText)
-	if type(aText) ~= "string" then return nil end
-	local tS = aText:lower():gsub(",", "."):gsub("^%s+", ""):gsub("%s+$", "")
-	if tS == "" then return nil end
-	local tPlain = tonumber(tS)
-	local tTotal
-	if tPlain then
-		tTotal = math.floor(tPlain * 10000 + 0.5)
-	else
-		tTotal = 0
-		for tNum, tUnit in tS:gmatch("(%d+)%s*(%a*)") do
-			local tC = tUnit:sub(1, 1)
-			local tN = tonumber(tNum)
-			if tC == "g" then tTotal = tTotal + tN * 10000
-			elseif tC == "s" then tTotal = tTotal + tN * 100
-			elseif tC == "k" or tC == "c" then tTotal = tTotal + tN end
-		end
-	end
-	if not tTotal or tTotal <= 0 then return nil end
-	local tOk, tCopper = pcall(C_AuctionHouse.SupportsCopperValues)
-	if tOk and not tCopper then tTotal = math.max(100, math.floor(tTotal / 100 + 0.5) * 100) end
-	return tTotal
 end
 
 local function tItemNameFor(aItemID, aLink)
@@ -710,16 +947,82 @@ local function tPostLabel()
 	return Sku.deEn("Einstellen", "Post auction", "Mettre en vente")
 end
 
+-- Market price hint while selling (Blizzard's sell frame lists the current offers and fills the
+-- price from the cheapest one). SendSellSearchQuery -> the usual search result events; the
+-- cheapest buyout / unit price is offered as the new price on the next Enter.
+local function tMarketLabel()
+	if gSell.marketState == "waiting" then
+		return Sku.deEn("Marktpreis wird abgefragt", "Looking up the market price", "Recherche du prix du marché")
+	end
+	if gSell.marketState == "done" then
+		if gSell.marketLowest then
+			return Sku.deEn("Günstigster Preis am Markt: ", "Cheapest price on the market: ", "Prix le plus bas du marché : ")
+				..tMoneyText(gSell.marketLowest)..". "..Sku.deEn("Enter übernimmt ihn als Preis", "Enter uses it as your price", "Entrée l'utilise comme prix")
+		end
+		return Sku.deEn("Keine Angebote am Markt, den Preis bestimmst du. Enter fragt erneut ab", "No offers on the market, you set the price. Enter asks again", "Aucune offre sur le marché, vous fixez le prix. Entrée redemande")
+	end
+	return Sku.deEn("Marktpreis abfragen", "Look up the market price", "Consulter le prix du marché")
+end
+
 local function tRefreshSellLabels()
 	local tL = gSell.leaves
 	if not tL then return end
 	if tL.quantity then tL.quantity.name = tQuantityLabel() end
 	if tL.duration then tL.duration.name = tDurationLabel() end
 	if tL.price then tL.price.name = tPriceLabel() end
+	if tL.market then tL.market.name = tMarketLabel() end
 	if tL.total then tL.total.name = tTotalLabel() end
 	if tL.bid then tL.bid.name = tBidLabel() end
 	if tL.deposit then tL.deposit.name = tDepositLabel() end
 	if tL.post then tL.post.name = tPostLabel() end
+end
+
+function AHF:StartMarketQuery()
+	if not gSell.loc or gSell.marketState == "waiting" then return end
+	local tKeyOk, tKey = pcall(C_AuctionHouse.GetItemKeyFromItem, gSell.loc)
+	if not tKeyOk or type(tKey) ~= "table" then
+		gSell.marketState = "done"
+		return
+	end
+	gSell.marketState = "waiting"
+	gSell.marketLowest = nil
+	gSell.marketKey = tKey
+	local tItem = gSell.loc
+	pcall(C_AuctionHouse.SendSellSearchQuery, tKey, {}, true)
+	C_Timer.After(6, function()
+		if gSell.marketState == "waiting" and gSell.loc == tItem then
+			gSell.marketState = "done"
+			tRefreshSellLabels()
+			tSay(tMarketLabel())
+		end
+	end)
+end
+
+-- Called from the search result events (see the event frame above).
+function AHF:OnSellMarketResult(aIsCommodity, aItemID)
+	if gSell.marketState ~= "waiting" or not gSell.marketKey then return end
+	if aItemID and aItemID ~= gSell.marketKey.itemID then return end
+	local tLowest
+	if aIsCommodity then
+		local tOkN, tNum = pcall(C_AuctionHouse.GetNumCommoditySearchResults, gSell.marketKey.itemID)
+		for i = 1, math.min((tOkN and tonumber(tNum)) or 0, 20) do
+			local tOk, tR = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, gSell.marketKey.itemID, i)
+			if tOk and tR and tR.unitPrice and (not tLowest or tR.unitPrice < tLowest) then tLowest = tR.unitPrice end
+		end
+	else
+		local tOkN, tNum = pcall(C_AuctionHouse.GetNumItemSearchResults, gSell.marketKey)
+		for i = 1, math.min((tOkN and tonumber(tNum)) or 0, 20) do
+			local tOk, tR = pcall(C_AuctionHouse.GetItemSearchResultInfo, gSell.marketKey, i)
+			if tOk and tR and tR.buyoutAmount and tR.buyoutAmount > 0 then
+				local tEach = math.floor(tR.buyoutAmount / math.max(1, tR.quantity or 1))
+				if not tLowest or tEach < tLowest then tLowest = tEach end
+			end
+		end
+	end
+	gSell.marketState = "done"
+	gSell.marketLowest = tLowest
+	tRefreshSellLabels()
+	tSay(tMarketLabel())
 end
 
 -- Returns true when the draft is ready, false when item data is not loaded yet.
@@ -811,14 +1114,6 @@ function AHF:PostDraft()
 	end
 end
 
-local function tSettingLeaf(aParent, aName, aOnAction)
-	local tE = SkuOptions:InjectMenuItems(aParent, {aName}, SkuGenericMenuItem)
-	tE.dynamic = false
-	tE.actionInPlace = true
-	tE.OnAction = aOnAction
-	return tE
-end
-
 local function tBuildSellItemChildren(aParent)
 	aParent.children = {}
 	local tLeaves = {}
@@ -841,6 +1136,15 @@ local function tBuildSellItemChildren(aParent)
 			local tP = tParseMoney(aText)
 			if tP then gSell.buyout = tP else tSay(Sku.deEn("Preis nicht verstanden", "Price not understood", "Prix non compris")) end
 		end)
+	end)
+	tLeaves.market = tSettingLeaf(aParent, tMarketLabel(), function()
+		if gSell.marketState == "done" and gSell.marketLowest then
+			gSell.buyout = gSell.marketLowest
+			tRefreshSellLabels()
+			return
+		end
+		AHF:StartMarketQuery()
+		tRefreshSellLabels()
 	end)
 	if (gSell.maxQuantity or 1) > 1 then
 		tLeaves.total = tSettingLeaf(aParent, tTotalLabel(), function()
@@ -939,24 +1243,6 @@ function AHF:StartOwnedQuery(aEntry)
 	end)
 end
 
-local function tTimeLeftText(aInfo)
-	local tSec = aInfo.timeLeftSeconds
-	if tSec and tSec > 0 then
-		if tSec >= 3600 then return tHours(math.floor(tSec / 3600 + 0.5)) end
-		return math.max(1, math.floor(tSec / 60 + 0.5)).." "..Sku.deEn("Minuten", "minutes", "minutes")
-	end
-	local tBand = aInfo.timeLeft
-	if tBand ~= nil then
-		return ({
-			[0] = Sku.deEn("unter 30 Minuten", "under 30 minutes", "moins de 30 minutes"),
-			[1] = Sku.deEn("unter 2 Stunden", "under 2 hours", "moins de 2 heures"),
-			[2] = Sku.deEn("unter 12 Stunden", "under 12 hours", "moins de 12 heures"),
-			[3] = Sku.deEn("über 12 Stunden", "over 12 hours", "plus de 12 heures"),
-		})[tBand] or ""
-	end
-	return ""
-end
-
 function AHF:RefreshOwned()
 	if gOwned.state == "idle" or not gOwned.entry then return end
 	local tRows = {}
@@ -1045,6 +1331,148 @@ local function tAppendOwnedChildren(aParent)
 		end
 	end
 end
+
+-- ---- My bids (Blizzard: Auctions tab > Bids) -------------------------------
+-- Auctions the player has bid on. QueryBids -> BIDS_UPDATED -> GetBidInfo(i). A row says whether
+-- the player is still the highest bidder or was outbid, and offers buyout / raising the bid.
+local gBids = { state = "idle", rows = {}, entry = nil, generation = 0 }
+
+function AHF:StartBidsQuery(aEntry)
+	gBids.state = "waiting"
+	gBids.entry = aEntry
+	gBids.generation = gBids.generation + 1
+	local tGen = gBids.generation
+	local tOk = pcall(C_AuctionHouse.QueryBids, {}, {})
+	if not tOk then
+		gBids.state = "done"
+		return
+	end
+	C_Timer.After(6, function()
+		if gBids.generation == tGen and gBids.state == "waiting" then
+			gBids.state = "done"
+			tRebuildAndFocus(gBids.entry)
+		end
+	end)
+end
+
+function AHF:RefreshBids()
+	if gBids.state == "idle" or not gBids.entry then return end
+	local tRows = {}
+	local tOkN, tNum = pcall(C_AuctionHouse.GetNumBids)
+	if tOkN and tNum then
+		for i = 1, tNum do
+			local tOk, tInfo = pcall(C_AuctionHouse.GetBidInfo, i)
+			if tOk and tInfo then
+				local tName
+				if tInfo.itemLink then tName = tInfo.itemLink:match("%[(.-)%]") end
+				if not tName and tInfo.itemKey then
+					local tKOk, tK = pcall(C_AuctionHouse.GetItemKeyInfo, tInfo.itemKey, false)
+					if tKOk and tK then tName = tK.itemName end
+				end
+				tRows[#tRows + 1] = {
+					name = tName or ("Item "..tostring(tInfo.itemKey and tInfo.itemKey.itemID)),
+					auctionID = tInfo.auctionID,
+					bidAmount = tInfo.bidAmount,
+					minBid = tInfo.minBid,
+					buyoutAmount = tInfo.buyoutAmount,
+					bidder = tInfo.bidder,
+					timeLeft = tInfo.timeLeft,
+					leading = tIsOwnGuid(tInfo.bidder),
+				}
+			end
+		end
+	end
+	gBids.rows = tRows
+	gBids.state = "done"
+	if not tCursorDeeperThan(gBids.entry) then tRebuildAndFocus(gBids.entry) end
+end
+
+local function tBidRowLabel(aRow)
+	local tParts = { aRow.name }
+	if aRow.leading then
+		tParts[#tParts + 1] = Sku.deEn("dein Gebot führt", "your bid is highest", "votre enchère est la plus haute")
+	else
+		tParts[#tParts + 1] = Sku.deEn("überboten", "outbid", "surenchéri")
+	end
+	if aRow.bidAmount and aRow.bidAmount > 0 then
+		tParts[#tParts + 1] = Sku.deEn("Gebot ", "bid ", "enchère ")..tMoneyText(aRow.bidAmount)
+	end
+	if aRow.buyoutAmount and aRow.buyoutAmount > 0 then
+		tParts[#tParts + 1] = Sku.deEn("Sofortkauf ", "buyout ", "achat immédiat ")..tMoneyText(aRow.buyoutAmount)
+	end
+	local tLeft = tTimeLeftText(aRow)
+	if tLeft ~= "" then tParts[#tParts + 1] = Sku.deEn("noch ", "left: ", "reste ")..tLeft end
+	return table.concat(tParts, ", ")
+end
+
+local function tAppendBidsChildren(aParent)
+	if gBids.entry ~= aParent then return end
+	if gBids.state == "waiting" then
+		local tW = SkuOptions:InjectMenuItems(aParent, {L["Warten"]}, SkuGenericMenuItem)
+		tW.dynamic = false
+		return
+	end
+	if #gBids.rows == 0 then
+		local tNone = SkuOptions:InjectMenuItems(aParent, {Sku.deEn("Keine Gebote", "No bids", "Aucune enchère")}, SkuGenericMenuItem)
+		tNone.dynamic = false
+		return
+	end
+	for _, tRow in ipairs(gBids.rows) do
+		local tE = SkuOptions:InjectMenuItems(aParent, {tBidRowLabel(tRow)}, SkuGenericMenuItem)
+		tE.dynamic = true
+		tE.data = tRow
+		tE.BuildChildren = function(self)
+			self.children = {}
+			local tData = self.data
+			if tData.buyoutAmount and tData.buyoutAmount > 0 then
+				local tBuy = SkuOptions:InjectMenuItems(self, {L["Kaufen"]..": "..tMoneyText(tData.buyoutAmount)}, SkuGenericMenuItem)
+				tBuy.dynamic = false
+				tBuy.OnAction = function() AHF:BuyItemAuction(tData.auctionID, tData.buyoutAmount, tData.name) end
+			end
+			-- Raising a bid you already lead is pointless; offer it only after being outbid.
+			local tCanBid = false
+			if not tData.leading then tCanBid = tAddBidLeaves(self, tData, tData.name) end
+			if not tCanBid and not (tData.buyoutAmount and tData.buyoutAmount > 0) then
+				local tNothing = SkuOptions:InjectMenuItems(self, {tData.leading
+					and Sku.deEn("Du führst mit deinem Gebot, nichts zu tun", "You are the highest bidder, nothing to do", "Vous êtes le meilleur enchérisseur, rien à faire")
+					or Sku.deEn("Kein Gebot möglich", "No bid possible", "Aucune enchère possible")}, SkuGenericMenuItem)
+				tNothing.dynamic = false
+			end
+		end
+	end
+end
+
+function AHF:BuildBidsChildren(aSelf)
+	if aSelf.ahfEntering then
+		AHF:StartBidsQuery(aSelf)
+	elseif gBids.entry ~= aSelf then
+		aSelf.children = {}
+		return
+	end
+	aSelf.children = {}
+	tAppendBidsChildren(aSelf)
+end
+
+local gBidEventFrame = CreateFrame("Frame")
+for _, tEvent in ipairs({ "BIDS_UPDATED", "BID_ADDED", "AUCTION_HOUSE_CLOSED" }) do
+	pcall(gBidEventFrame.RegisterEvent, gBidEventFrame, tEvent)
+end
+gBidEventFrame:SetScript("OnEvent", function(self, aEvent, ...)
+	local tOk, tErr = pcall(function()
+		if aEvent == "BIDS_UPDATED" then
+			AHF:RefreshBids()
+		elseif aEvent == "BID_ADDED" then
+			-- only while the auction house is open (the event is also sent for the login bid list)
+			if _G.AuctionHouseFrame and _G.AuctionHouseFrame.IsShown and _G.AuctionHouseFrame:IsShown() then
+				tSay(Sku.deEn("Gebot abgegeben", "Bid placed", "Enchère placée"))
+			end
+			if gBids.entry and gBids.state ~= "idle" then AHF:StartBidsQuery(gBids.entry) end
+		elseif aEvent == "AUCTION_HOUSE_CLOSED" then
+			gBids.state, gBids.entry, gBids.rows = "idle", nil, {}
+		end
+	end)
+	if not tOk then dprint("auctionHouseForever bid event error", aEvent, tErr) end
+end)
 
 function AHF:BuildSalesChildren(aSelf)
 	aSelf.children = {}
@@ -1171,6 +1599,21 @@ function AHF:BuildSearchEntries(aSelf)
 			tNone.dynamic = false
 		end
 	end
+
+	-- Favourite items (Blizzard: the star in the search bar); only where the server supports them.
+	if tFavoritesAvailable() then
+		local tFavEntry = SkuOptions:InjectMenuItems(aSelf, {Sku.deEn("Favoriten", "Favorites", "Favoris")}, SkuGenericMenuItem)
+		tFavEntry.dynamic = true
+		tMarkEntering(tFavEntry)
+		tFavEntry.BuildChildren = function(self)
+			if gBrowse.entry ~= self then
+				if not self.ahfEntering then self.children = {} return end
+				AHF:StartFavorites(self)
+			end
+			self.children = {}
+			tAppendBrowseResultChildren(self)
+		end
+	end
 end
 
 -- Root: Auktionen > [Suche, Kategorie]; darunter (gleiche Ebene) Verkäufe > [Neue Auktion, Aktuelle Verkäufe]
@@ -1185,4 +1628,10 @@ function AHF:MenuBuilder(aSelf)
 	local tSales = SkuOptions:InjectMenuItems(aSelf, {Sku.deEn("Verkäufe", "Sales", "Ventes")}, SkuGenericMenuItem)
 	tSales.dynamic = true
 	tSales.BuildChildren = function(selfSales) AHF:BuildSalesChildren(selfSales) end
+
+	-- Auctions the player has bid on (Blizzard: Auctions tab > Bids).
+	local tBidsEntry = SkuOptions:InjectMenuItems(aSelf, {Sku.deEn("Meine Gebote", "My bids", "Mes enchères")}, SkuGenericMenuItem)
+	tBidsEntry.dynamic = true
+	tMarkEntering(tBidsEntry)
+	tBidsEntry.BuildChildren = function(selfBids) AHF:BuildBidsChildren(selfBids) end
 end

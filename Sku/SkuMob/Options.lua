@@ -472,25 +472,100 @@ local function tBuildTargetMenu(aParent)
 					return
 				end
 				local tPrompt = L["MOB_PetReleaseWarning"]
+				-- Das Sku-Menue haelt ENTER/ESC fest, solange es offen ist: das Bestaetigungsfeld bekam die Taste nie
+				-- (Log 15:32: "click ENTER" ging ins Menue, nicht an die Editbox). Wie beim Umbenennen erst das Menue
+				-- schliessen, dann zeitversetzt das Feld oeffnen.
+				if SkuOptions and SkuOptions.CloseMenu then pcall(SkuOptions.CloseMenu, SkuOptions) end
+				C_Timer.After(0.4, function()
 				SkuCore:ConfirmButtonShow(
 					tPrompt,
 					function()
-						if _G.PetAbandon then pcall(_G.PetAbandon) end
-						tSay(L["MOB_PetReleased"])
+						-- [Forever] PetAbandon liegt jetzt in C_PetInfo (das Global gibt es nicht mehr); der alte
+						-- Aufruf tat deshalb nach der Bestaetigung stumm nichts.
+						local tAbandon = _G.PetAbandon or (_G.C_PetInfo and _G.C_PetInfo.PetAbandon)
+						if not tAbandon then
+							dprint("PetAbandon: weder Global noch C_PetInfo vorhanden")
+							return
+						end
+						-- Ehrliche Rueckmeldung: "entlassen" erst sagen, wenn das Pet WIRKLICH weg ist. Fehlermeldungen des
+						-- Servers (UI_ERROR_MESSAGE) werden vorgelesen und stehen im Log.
+						local tCanBefore = _G.PetCanBeAbandoned and _G.PetCanBeAbandoned()
+						dprint("PetAbandon vor", "canAbandon", tostring(tCanBefore), "petExists", tostring(UnitExists("pet")))
+						-- Diagnose: was weiss das Spiel ueber dieses Pet?
+						do
+							local tSI = _G.C_StableInfo
+							local function tDump(aName, aFn, ...)
+								if not aFn then dprint("PetAbandon diag", aName, "fehlt") return end
+								local tOkD, tA, tB = pcall(aFn, ...)
+								if not tOkD then dprint("PetAbandon diag", aName, "Fehler", tostring(tA)) return end
+								if type(tA) == "table" then
+									local tParts = {}
+									for i, v in ipairs(tA) do
+										tParts[#tParts + 1] = tostring(i) .. ":" .. tostring(v.name) .. "#nr" .. tostring(v.petNumber) .. "/slot" .. tostring(v.slotID)
+									end
+									dprint("PetAbandon diag", aName, "n", #tA, table.concat(tParts, " "))
+								else
+									dprint("PetAbandon diag", aName, tostring(tA), tostring(tB))
+								end
+							end
+							tDump("GetActivePetList", tSI and tSI.GetActivePetList)
+							tDump("GetStabledPetList", tSI and tSI.GetStabledPetList)
+							tDump("IsAtStableMaster", tSI and tSI.IsAtStableMaster)
+							tDump("PetHasActionBar", _G.PetHasActionBar)
+							tDump("PetCanBeRenamed", _G.PetCanBeRenamed)
+							dprint("PetAbandon diag", "UnitName(pet)", tostring(UnitName("pet")), "family", tostring(UnitCreatureFamily("pet")), "UnitIsPlayer", tostring(UnitPlayerControlled and UnitPlayerControlled("pet")))
+						end
+						local tErrFrame = CreateFrame("Frame")
+						local tSawError
+						tErrFrame:RegisterEvent("UI_ERROR_MESSAGE")
+						tErrFrame:SetScript("OnEvent", function(_, _, _, aMsg)
+							tSawError = true
+							dprint("PetAbandon Fehlermeldung", tostring(aMsg))
+							if type(aMsg) == "string" then tSay(aMsg) end
+						end)
+						local tOk, tErr = pcall(tAbandon)
+						if not tOk then dprint("PetAbandon failed", tostring(tErr)) end
+						C_Timer.After(1.0, function()
+							local tStill = UnitExists("pet")
+							dprint("PetAbandon nach 1s", "petExists", tostring(tStill))
+							-- Zweiter Versuch mit Pet-Nummer (Forever fuehrt Pets ueber die Stallliste).
+							if tStill and _G.C_StableInfo and _G.C_StableInfo.GetActivePetList then
+								local tOkL, tList = pcall(_G.C_StableInfo.GetActivePetList)
+								local tPet = tOkL and type(tList) == "table" and tList[1]
+								if tOkL and type(tList) == "table" then
+									-- das Pet mit dem Namen des gerufenen Pets bevorzugen
+									for _, tCand in ipairs(tList) do
+										if tCand.name and tCand.name == UnitName("pet") then tPet = tCand break end
+									end
+								end
+								if tPet and tPet.petNumber then
+									dprint("PetAbandon Versuch 2", "petNumber", tostring(tPet.petNumber))
+									local tOk2, tErr2 = pcall(tAbandon, tPet.petNumber)
+									if not tOk2 then dprint("PetAbandon Versuch 2 failed", tostring(tErr2)) end
+								end
+							end
+							C_Timer.After(1.0, function()
+								tErrFrame:UnregisterAllEvents()
+								tErrFrame:SetScript("OnEvent", nil)
+								local tGone = not UnitExists("pet")
+								dprint("PetAbandon Ergebnis", "petGone", tostring(tGone), "sawError", tostring(tSawError))
+								if tGone then tSay(L["MOB_PetReleased"]) end
+							end)
+						end)
 					end,
 					function()
 						tSay(L["EQ_Cancelled"] or "")
 					end)
-				if _G.C_Timer and _G.C_Timer.After
-					and SkuOptions and SkuOptions.Voice
+				if SkuOptions and SkuOptions.Voice
 					and SkuOptions.Voice.OutputStringBTtts then
-					_G.C_Timer.After(0.5, function()
+					_G.C_Timer.After(0.3, function()
 						pcall(function()
 							SkuOptions.Voice:OutputStringBTtts(
 								tPrompt, true, true, 0.1, nil, nil, nil, 2)
 						end)
 					end)
 				end
+				end)
 			end, L["MOB_PetReleaseTip"])
 
 			-- PetRename

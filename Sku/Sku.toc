@@ -1,7 +1,7 @@
 ﻿## Interface: 20506, 11509, 16001
-## Title: Sku Forever v1.0
+## Title: Sku Forever v1.1
 ## SavedVariables: SkuOptionsDB, SkuTranslatedData, SkuErrorLog, SkuDebugLog
-## Version: 1.0
+## Version: 1.1
 
 SkuPerfFileStamp.lua
 
@@ -63,6 +63,7 @@ SkuCore\RangeCheck.lua
 SkuCore\auctionHouse.lua
 SkuCore\auctionHouseForever.lua
 SkuCore\professionsForever.lua
+SkuCore\petHealthForever.lua
 SkuCore\friends.lua
 # SkuCore\lfg.lua  -- entfernt: Dungeon-Browser-Modul wird neu aufgebaut
 SkuCore\voiceOutput.lua

@@ -408,6 +408,25 @@ function SkuUtil:ResetScanningTooltip()
 	if not tTooltip.SetSpellByID and tTooltip.SetHyperlink then
 		tTooltip.SetSpellByID = function(aSelf, aId) return aSelf:SetHyperlink("spell:" .. tostring(aId)) end
 	end
+	-- Same for SetPetAction (pet bar buttons): spell via hyperlink, tokens (Attack, Follow,
+	-- Stay, Passive ...) as a plain name line, so the pet bar reads like on the old clients.
+	if not tTooltip.SetPetAction and tTooltip.SetHyperlink then
+		tTooltip.SetPetAction = function(aSelf, aSlot)
+			if not _G.GetPetActionInfo then return false end
+			local tOk, tName, _, tIsToken, _, _, _, tSpellID = pcall(_G.GetPetActionInfo, aSlot)
+			if not tOk or not tName then return false end
+			if tSpellID then
+				aSelf:SetHyperlink("spell:" .. tostring(tSpellID))
+			else
+				local tText = tIsToken and _G[tName] or tName
+				aSelf:AddLine(tostring(tText))
+				if tIsToken and _G[tName .. "_TOOLTIP"] then
+					aSelf:AddLine(tostring(_G[tName .. "_TOOLTIP"]))
+				end
+			end
+			return true
+		end
+	end
 	tTooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
 	tTooltip:ClearLines()
 	return tTooltip

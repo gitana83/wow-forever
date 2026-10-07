@@ -435,16 +435,27 @@ end
 local function tBagItemDataText(bag, slot)
 	local tInfo = _G.C_TooltipInfo
 	if not tInfo then return nil end
+	-- Forever: GetBagItem can return a stripped tooltip (name/slot only, no armor,
+	-- stats or required level), so try every source and keep the one with most lines.
 	local tData
+	local function tConsider(tD)
+		if type(tD) ~= "table" or type(tD.lines) ~= "table" then return end
+		if not tData or #tD.lines > #tData.lines then tData = tD end
+	end
 	if tInfo.GetBagItem then
 		local tOk, tD = pcall(tInfo.GetBagItem, bag, slot)
-		if tOk then tData = tD end
+		if tOk then tConsider(tD) end
 	end
-	if not tData and tInfo.GetItemByID and _G.GetContainerItemID then
+	if _G.GetContainerItemID then
 		local tId = GetContainerItemID(bag, slot)
-		if tId then
+		local tLink = _G.GetContainerItemLink and GetContainerItemLink(bag, slot)
+		if tLink and tInfo.GetHyperlink then
+			local tOk, tD = pcall(tInfo.GetHyperlink, tLink)
+			if tOk then tConsider(tD) end
+		end
+		if tId and tInfo.GetItemByID then
 			local tOk, tD = pcall(tInfo.GetItemByID, tId)
-			if tOk then tData = tD end
+			if tOk then tConsider(tD) end
 		end
 	end
 	if type(tData) ~= "table" or type(tData.lines) ~= "table" then return nil end
@@ -458,6 +469,32 @@ local function tBagItemDataText(bag, slot)
 	end
 	if #tOut == 0 then return nil end
 	return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
+end
+
+-- WoW Forever/Camelot: C_TooltipInfo data for a bag item can come back stripped (name and
+-- slot only, no armor, stats or required level), while the real GameTooltip:SetBagItem
+-- -- what Blizzard's own bag buttons use -- renders the full tooltip. Read that one.
+-- Returns the text or nil.
+local function tBagGameTooltipText(bag, slot)
+	if not (GameTooltip and GameTooltip.SetBagItem) then return nil end
+	local tText
+	pcall(function()
+		GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+		GameTooltip:ClearLines()
+		tSetTooltipContainerItem(GameTooltip, bag, slot)
+		local tRaw = TooltipLines_helper(GameTooltip:GetRegions())
+		if tRaw ~= "asd" and tRaw ~= "" then
+			tText = SkuUtil:Unescape((string.gsub(tRaw, "[^\r\n]*Open Issue Report[^\r\n]*[\r\n]*", "")))
+		end
+	end)
+	pcall(function() GameTooltip:Hide() end)
+	return tText
+end
+
+local function tCountLines(aText)
+	if not aText then return 0 end
+	local _, tN = string.gsub(aText, "\n", "")
+	return tN + 1
 end
 
 local function getItemTooltipTextFromBagItem(bag, slot, itemId, button)
@@ -479,6 +516,8 @@ local function getItemTooltipTextFromBagItem(bag, slot, itemId, button)
 
 		if not itemId then
 			local tDataText = tBagItemDataText(bag, slot)
+			local tGtText = tBagGameTooltipText(bag, slot)
+			if tCountLines(tGtText) > tCountLines(tDataText) then tDataText = tGtText end
 			if tDataText then return tDataText, nil end
 		end
 		local tText, tPending = getItemTooltipTextHelper(function(tooltip)
@@ -2501,11 +2540,530 @@ local function tBuildActiveSpecUI(aParentChilds)
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+-- [Forever] Mists-Talentfenster (Blizzard_TalentUI/Mists). Aufbau:
+--   Reiter 1 Spezialisierung: PlayerTalentFrameSpecialization.specButton1..4 + .learnButton
+--   Reiter 2 Talente: PlayerTalentFrameTalents.tier1..6.talent1..3 (je Stufe EIN Talent) + .learnButton
+--   Reiter 3 Glyphen (GlyphFrame, eigenes AddOn), Reiter 4 Begleiter-Spezialisierung
+--   PlayerSpecTab1/2 = Talentgruppe (Doppelspezialisierung), PlayerTalentFrameActivateButton
+-- Der alte Builder suchte die WotLK-Widgets PlayerTalentFrameTalent1.. und PlayerTalentFrameSpentPointsText;
+-- die gibt es hier nicht, der erste nil:IsVisible() brach den Bau ab (nur der Oeffnen-Ton blieb).
+-- Gelesen wird deshalb ueber die API (C_SpecializationInfo), bedient ueber die echten Knoepfe.
+-- Jeder Abschnitt laeuft einzeln unter pcall: ein Fehler darin darf nie das ganze Menue kosten.
+---------------------------------------------------------------------------------------------------------------------------------------
+local function tTalentSafe(aFunc, ...)
+	local tOk, a, b, c, d = pcall(aFunc, ...)
+	if not tOk then
+		pcall(function() local h = geterrorhandler and geterrorhandler(); if h then h(a) end end)
+		return nil
+	end
+	return a, b, c, d
+end
+
+local function tTalentAdd(aParentChilds, aLabel, aEntry)
+	aLabel = SkuUtil:Unescape(tostring(aLabel or "?"))
+	local tKey, tN = aLabel, 1
+	while aParentChilds[tKey] do
+		tN = tN + 1
+		tKey = aLabel .. " #" .. tN
+	end
+	aEntry.textFirstLine = tKey
+	table.insert(aParentChilds, tKey)
+	aParentChilds[tKey] = aEntry
+	return aEntry
+end
+
+local function tTalentText(aParentChilds, aLabel, aFrame)
+	tTalentAdd(aParentChilds, aLabel, {
+		frameName = aFrame and aFrame.GetName and aFrame:GetName() or "",
+		RoC = "Child",
+		type = "Text",
+		obj = aFrame or _G["PlayerSpellsFrame"] or _G["PlayerTalentFrame"],
+		textFull = "",
+		childs = {},
+	})
+end
+
+-- Knopf als klickbarer Eintrag; gesperrte/versteckte Knoepfe bleiben lesbar, loesen aber nichts aus.
+local function tTalentButton(aParentChilds, aLabel, aButton, aFull, aSkipClick)
+	local tClickable = aButton and not aSkipClick and (not aButton.IsEnabled or aButton:IsEnabled())
+	local tFunc = tClickable and aButton.GetScript and aButton:GetScript("OnClick") or nil
+	return tTalentAdd(aParentChilds, aLabel, {
+		frameName = aButton and aButton.GetName and aButton:GetName() or "",
+		RoC = "Child",
+		type = "Button",
+		obj = aButton,
+		textFull = aFull or "",
+		childs = {},
+		func = tFunc,
+		click = tFunc ~= nil,
+	})
+end
+
+local function tTalentSpecSection(aParentChilds)
+	local tFrame = _G["PlayerTalentFrameSpecialization"]
+	if not (tFrame and tFrame.specButton1) then return end
+	local tNum = _G.GetNumSpecializations and _G.GetNumSpecializations() or 0
+	if tNum == 0 then
+		-- Spezialisierungsdaten noch nicht da (vor dem Weltbetreten): sichtbare Knoepfe zaehlen.
+		for i = 1, 4 do
+			if tFrame["specButton"..i] and tFrame["specButton"..i]:IsShown() then tNum = i end
+		end
+	end
+	local tLearnedIdx = C_SpecializationInfo and C_SpecializationInfo.GetSpecialization and C_SpecializationInfo.GetSpecialization(nil, false, PlayerTalentFrame and PlayerTalentFrame.talentGroup) or nil
+	for i = 1, math.min(tNum, 4) do
+		local tButton = tFrame["specButton"..i]
+		local _, tName, tDesc = C_SpecializationInfo.GetSpecializationInfo(i)
+		local tRole = _G.GetSpecializationRole and _G.GetSpecializationRole(i)
+		if tButton and tName then
+			local tLabel = tName
+			if tRole and _G[tRole] then tLabel = tLabel .. " (" .. _G[tRole] .. ")" end
+			if tLearnedIdx and tLearnedIdx == i then tLabel = tLabel .. " (" .. L["aktiv"] .. ")" end
+			if tButton.selected then tLabel = tLabel .. " (" .. L["selected"] .. ")" end
+			if tButton.disabled then tLabel = tLabel .. " (" .. L["disabled"] .. ")" end
+			tTalentButton(aParentChilds, tLabel, tButton, tDesc or "", tButton.selected == true)
+		end
+	end
+	-- Learn: nur sinnvoll, solange noch keine Spezialisierung gewaehlt ist und der Knopf frei ist.
+	local tLearn = tFrame.learnButton
+	if tLearn and tLearn:IsShown() then
+		local tLabel = _G.LEARN or "Learn"
+		if not tLearn:IsEnabled() then tLabel = tLabel .. " (" .. L["disabled"] .. ")" end
+		tTalentButton(aParentChilds, tLabel, tLearn, "")
+	end
+end
+
+local function tTalentTalentsSection(aParentChilds)
+	local tFrame = _G["PlayerTalentFrameTalents"]
+	if not tFrame then return end
+	local tGroup = tFrame.talentGroup or (PlayerTalentFrame and PlayerTalentFrame.talentGroup) or 1
+	local tNumUnspent = _G.GetNumUnspentTalents and _G.GetNumUnspentTalents() or 0
+	if tNumUnspent > 0 and _G.PLAYER_UNSPENT_TALENT_POINTS then
+		tTalentText(aParentChilds, "Text: " .. string.format(_G.PLAYER_UNSPENT_TALENT_POINTS, tNumUnspent), tFrame.unspentText)
+	end
+	local tNumCols = (Constants and Constants.TalentConsts and Constants.TalentConsts.NumTalentColumns) or 3
+	for tier = 1, 6 do
+		local tRow = tFrame["tier"..tier]
+		if tRow then
+			local tTierAvailable, tSelectedColumn, tTierLevel = _G.GetTalentTierInfo(tier, tGroup, false, "player")
+			for column = 1, tNumCols do
+				local tButton = tRow["talent"..column]
+				local tInfo = C_SpecializationInfo.GetTalentInfo({tier = tier, column = column, groupIndex = tGroup, isInspect = false, target = "player"})
+				if tButton and tInfo and tInfo.name then
+					local tLabel = (_G.LEVEL or "Level") .. " " .. tostring(tTierLevel or "?") .. ": " .. tInfo.name
+					local tPending = (tRow.selectionId ~= nil and tRow.selectionId == tInfo.talentID)
+					if tInfo.selected or tInfo.known then
+						tLabel = tLabel .. " (" .. L["selected"] .. ")"
+					elseif tPending then
+						tLabel = tLabel .. " (" .. (_G.LEARN or "Learn") .. ")"
+					elseif not tInfo.available or not tTierAvailable then
+						tLabel = tLabel .. " (" .. L["disabled"] .. ")"
+					end
+					-- Beschreibung: erst der echte Tooltip des Knopfes, sonst die Zauberbeschreibung.
+					local tFull
+					local tOkTip, tFirst, tAll = pcall(GetTooltipLines, tButton)
+					if tOkTip and tAll and tAll ~= "" then tFull = tAll end
+					if not tFull and tInfo.spellID and C_Spell and C_Spell.GetSpellDescription then
+						tFull = tTalentSafe(C_Spell.GetSpellDescription, tInfo.spellID)
+					end
+					-- Auch "gesperrte" Talente bleiben anklickbar: der Blizzard-Handler entscheidet selbst
+					-- (z. B. Dialog "Talent wechseln", wenn die Stufe schon belegt ist).
+					tTalentButton(aParentChilds, tLabel, tButton, tFull or "")
+				end
+			end
+		end
+	end
+	local tLearn = tFrame.learnButton
+	if tLearn and tLearn:IsShown() then
+		local tLabel = _G.LEARN or "Learn"
+		if not tLearn:IsEnabled() then tLabel = tLabel .. " (" .. L["disabled"] .. ")" end
+		tTalentButton(aParentChilds, tLabel, tLearn, "")
+	end
+end
+
+local function tBuildMistsTalentUI(aParentChilds)
+	local tTitle = _G["PlayerTalentFrameTitleText"]
+	if tTitle and tTitle.GetText and tTitle:GetText() then
+		tTalentText(aParentChilds, "Text: " .. tTitle:GetText(), tTitle)
+	end
+
+	-- Talentgruppe (Doppelspezialisierung)
+	for x = 1, 2 do
+		local tSpecTab = _G["PlayerSpecTab"..x]
+		if tSpecTab and tSpecTab:IsShown() then
+			local tSpecInfo = _G.TALENT_UI_SPECS and _G.TALENT_UI_SPECS[tSpecTab.specIndex or ("spec"..x)]
+			local tLabel = (tSpecInfo and tSpecInfo.name) or ("Spec " .. x)
+			if _G.C_SpecializationInfo and C_SpecializationInfo.GetActiveSpecGroup and C_SpecializationInfo.GetActiveSpecGroup(false) == x then
+				tLabel = tLabel .. " (" .. L["aktiv"] .. ")"
+			end
+			local tChecked = tSpecTab.GetChecked and tSpecTab:GetChecked()
+			if tChecked then tLabel = tLabel .. " (" .. L["selected"] .. ")" end
+			tTalentButton(aParentChilds, tLabel, tSpecTab, "", tChecked and true or false)
+		end
+	end
+	-- Aktivieren-Knopf (andere Talentgruppe angezeigt)
+	local tActivate = _G["PlayerTalentFrameActivateButton"]
+	if tActivate and tActivate:IsShown() then
+		tTalentButton(aParentChilds, tActivate:GetText() or "Activate", tActivate, "")
+	end
+
+	-- Reiter
+	local tSelectedTab = _G.PanelTemplates_GetSelectedTab and PanelTemplates_GetSelectedTab(PlayerTalentFrame) or nil
+	for x = 1, 4 do
+		local tTab = _G["PlayerTalentFrameTab"..x]
+		if tTab and tTab:IsShown() then
+			local tLabel = tTab:GetText() or (L["Tab"] .. " " .. x)
+			local tIsSelected = (tSelectedTab == x)
+			if tIsSelected then tLabel = tLabel .. " (" .. L["selected"] .. ")" end
+			tTalentButton(aParentChilds, L["Tab"] .. " " .. tLabel, tTab, "", tIsSelected)
+		end
+	end
+
+	-- Inhalt des gewaehlten Reiters
+	if tSelectedTab == 1 or (tSelectedTab == nil and _G["PlayerTalentFrameSpecialization"] and _G["PlayerTalentFrameSpecialization"]:IsShown()) then
+		tTalentSafe(tTalentSpecSection, aParentChilds)
+	elseif tSelectedTab == 2 or (_G["PlayerTalentFrameTalents"] and _G["PlayerTalentFrameTalents"]:IsShown()) then
+		tTalentSafe(tTalentTalentsSection, aParentChilds)
+	end
+	-- Glyphen-Reiter (3): das GlyphFrame ist ein eigenes AddOn, dessen Aufbau hier nicht vorliegt;
+	-- Titel und Reiter bleiben erreichbar, Inhalt folgt, sobald der echte Aufbau bekannt ist.
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- [Forever] PlayerSpellsFrame: das Fenster der Taste N (Bindings_Camelot: PlayerSpellsUtil.ToggleClassTalentOrSpecFrame).
+-- Das ist das Retail-Talentfenster mit drei Reitern - Spezialisierung (.SpecFrame), Talentbaum (.TalentsFrame,
+-- Knoten ueber C_Traits), Zauberbuch (.SpellBookFrame). Quelle: Blizzard_PlayerSpells / Blizzard_SharedTalentUI
+-- (ki bereich/wissen/wow-midnight-api). Der Baum ist ein Graph; fuer die Menuefuehrung wird er nach Reihe
+-- (posY) und Spalte (posX) flach sortiert. Bedient werden die ECHTEN Knoepfe des Fensters (OnClick), damit
+-- Blizzards eigene Pruefungen (Kosten, Sperren, Bestaetigungen) greifen. Aenderungen sind vorgemerkt, bis
+-- "Anwenden" gedrueckt wird. Hero-Talente und Ladeouts sind noch nicht im Menue.
+---------------------------------------------------------------------------------------------------------------------------------------
+local function tSpellsFrameEntryInfo(aConfigID, aEntryID)
+	-- liefert Name, Beschreibung fuer einen Talenteintrag (Zauber-Talent oder Unterbaum)
+	local tEntryInfo = C_Traits.GetEntryInfo(aConfigID, aEntryID)
+	if not tEntryInfo then return nil, nil end
+	local tName, tDesc
+	if tEntryInfo.definitionID then
+		local tDef = C_Traits.GetDefinitionInfo(tEntryInfo.definitionID)
+		local tSpellID = tDef and (tDef.overriddenSpellID or tDef.spellID)
+		if tSpellID then
+			if C_Spell.GetSpellName then tName = C_Spell.GetSpellName(tSpellID) end
+			if not tName and C_Spell.GetSpellInfo then
+				local tSi = C_Spell.GetSpellInfo(tSpellID)
+				tName = tSi and tSi.name
+			end
+			if C_Spell.GetSpellDescription then tDesc = C_Spell.GetSpellDescription(tSpellID) end
+		end
+		if tDef and not tName then tName = tDef.overrideName end
+	elseif tEntryInfo.subTreeID then
+		local tSub = C_Traits.GetSubTreeInfo(aConfigID, tEntryInfo.subTreeID)
+		tName = tSub and tSub.name
+		tDesc = tSub and tSub.description
+	end
+	return tName, tDesc
+end
+
+local function tSpellsFrameClick(aButton, aMouseButton)
+	return function()
+		if aButton and aButton.OnClick then
+			aButton:OnClick(aMouseButton or "LeftButton")
+		elseif aButton and aButton.GetScript and aButton:GetScript("OnClick") then
+			aButton:GetScript("OnClick")(aButton, aMouseButton or "LeftButton")
+		end
+	end
+end
+
+local function tSpellsFrameAction(aParentChilds, aLabel, aFunc, aFull, aEnabled)
+	local tFrame = _G["PlayerSpellsFrame"]
+	return tTalentAdd(aParentChilds, aLabel, {
+		frameName = "PlayerSpellsFrameAction",
+		RoC = "Child",
+		type = "Button",
+		obj = tFrame,
+		textFull = aFull or "",
+		childs = {},
+		func = aFunc,
+		click = aFunc ~= nil and aEnabled ~= false,
+	})
+end
+
+local function tSpellsFrameSpecSection(aParentChilds, aSpecFrame)
+	if not (C_SpecializationInfo and C_SpecializationInfo.IsInitialized and C_SpecializationInfo.IsInitialized()) then return end
+	local tActive = C_SpecializationInfo.GetSpecialization()
+	local tIndexes = {}
+	-- Nicht nur die Eintraege, die Blizzards Reiter gerade zeigt (der kennt bei dieser Figur nur EINE Spezialisierung):
+	-- alle Indizes der Klasse abfragen und die mit Namen anzeigen.
+	local tClassID = select(3, UnitClass("player"))
+	local tClassNum = tClassID and C_SpecializationInfo.GetNumSpecializationsForClassID(tClassID) or 0
+	local tGameNum = _G.GetNumSpecializations and _G.GetNumSpecializations() or 0
+	local tSelEnabled = tClassID and C_SpecializationInfo.IsSpecSelectionEnabled and C_SpecializationInfo.IsSpecSelectionEnabled(tClassID)
+	dprint("SpecMenu", "level", UnitLevel("player"), "classID", tostring(tClassID), "classNum", tClassNum, "gameNum", tGameNum, "selectionEnabled", tostring(tSelEnabled), "active", tostring(tActive))
+	for i = 1, math.max(tClassNum, tGameNum, 4) do tIndexes[#tIndexes + 1] = i end
+	for _, tIdx in ipairs(tIndexes) do
+		local _, tName, tDesc, _, tRole = C_SpecializationInfo.GetSpecializationInfo(tIdx)
+		if tName then
+			local tLabel = tName
+			if tRole and _G[tRole] then tLabel = tLabel .. " (" .. _G[tRole] .. ")" end
+			local tIsActive = (tActive == tIdx)
+			if tIsActive then tLabel = tLabel .. " (" .. L["aktiv"] .. ")" end
+			local tFunc
+			if not tIsActive then
+				tFunc = function()
+					-- direkter Weg wie Blizzards Aktivieren-Knopf (ClassSpecContentFrameMixin:OnActivateClicked)
+					if C_SpecializationInfo.SetSpecialization(tIdx) and aSpecFrame and aSpecFrame.SetSpecActivateStarted then
+						aSpecFrame:SetSpecActivateStarted(tIdx)
+					end
+				end
+			end
+			tSpellsFrameAction(aParentChilds, tLabel, tFunc, tDesc or "")
+		end
+	end
+end
+
+local function tSpellsFrameNodeEntry(aParentChilds, aTalentsFrame, aConfigID, aButton, aNodeInfo)
+	local tChoices = aButton.talentSelections
+	local tRank = aNodeInfo.currentRank or 0
+	local tMax = aNodeInfo.maxRanks or 0
+	local tIsLocked = aButton.IsLocked and aButton:IsLocked()
+
+	-- Auswahlknoten (entweder-oder): Untermenue mit den Eintraegen
+	if type(tChoices) == "table" and #tChoices > 0 and aButton.SetSelectedEntryID then
+		local tSelectedID = aButton.GetSelectedEntryID and aButton:GetSelectedEntryID() or nil
+		local tNames = {}
+		for _, tEntryID in ipairs(tChoices) do
+			tNames[#tNames + 1] = tSpellsFrameEntryInfo(aConfigID, tEntryID) or "?"
+		end
+		local tLabel = table.concat(tNames, " / ")
+		if tSelectedID then
+			tLabel = (tSpellsFrameEntryInfo(aConfigID, tSelectedID) or tLabel) .. " (" .. L["selected"] .. ")"
+		elseif tIsLocked then
+			tLabel = tLabel .. " (" .. L["disabled"] .. ")"
+		end
+		local tNode = tTalentAdd(aParentChilds, tLabel, {
+			frameName = "PlayerSpellsFrameChoice",
+			RoC = "Child",
+			type = "Button",
+			obj = _G["PlayerSpellsFrame"],
+			textFull = "",
+			childs = {},
+		})
+		for _, tEntryID in ipairs(tChoices) do
+			local tName, tDesc = tSpellsFrameEntryInfo(aConfigID, tEntryID)
+			local tSub = tName or "?"
+			if tEntryID == tSelectedID then tSub = tSub .. " (" .. L["selected"] .. ")" end
+			local tEntryFunc
+			if tEntryID ~= tSelectedID and not tIsLocked then
+				tEntryFunc = function() aButton:SetSelectedEntryID(tEntryID) end
+			end
+			tSpellsFrameAction(tNode.childs, tSub, tEntryFunc, tDesc or "")
+		end
+		-- zuruecknehmen
+		if aButton.CanRefundRank and aButton:CanRefundRank() and tSelectedID then
+			tSpellsFrameAction(tNode.childs, (_G.TALENT_FRAME_REFUND or "Refund"), tSpellsFrameClick(aButton, "RightButton"))
+		end
+		return
+	end
+
+	-- normaler Knoten (Rang kaufen)
+	local tEntryID = aNodeInfo.entryIDs and aNodeInfo.entryIDs[1]
+	local tName, tDesc = tSpellsFrameEntryInfo(aConfigID, (aNodeInfo.activeEntry and aNodeInfo.activeEntry.entryID) or tEntryID)
+	tName = tName or "?"
+	local tLabel = tName
+	if tMax > 1 or tRank > 0 then tLabel = tLabel .. " (" .. tRank .. "/" .. tMax .. ")" end
+	local tCanBuy = aButton.CanPurchaseRank and aButton:CanPurchaseRank()
+	if tRank >= tMax and tMax > 0 then
+		tLabel = tLabel .. " (" .. L["selected"] .. ")"
+	elseif tIsLocked or not tCanBuy then
+		tLabel = tLabel .. " (" .. L["disabled"] .. ")"
+	end
+	tSpellsFrameAction(aParentChilds, tLabel, tSpellsFrameClick(aButton, "LeftButton"), tDesc or "", tCanBuy and true or false)
+	if aButton.CanRefundRank and aButton:CanRefundRank() then
+		tSpellsFrameAction(aParentChilds, (_G.TALENT_FRAME_REFUND or "Refund") .. ": " .. tName, tSpellsFrameClick(aButton, "RightButton"))
+	end
+end
+
+local function tSpellsFrameTalentsSection(aParentChilds, aTalentsFrame)
+	local tConfigID = aTalentsFrame.GetConfigID and aTalentsFrame:GetConfigID()
+	local tTreeID = aTalentsFrame.GetTalentTreeID and aTalentsFrame:GetTalentTreeID()
+	if not tConfigID then return end
+
+	-- Punkte
+	if tTreeID then
+		local tCurrencies = C_Traits.GetTreeCurrencyInfo(tConfigID, tTreeID, false)
+		if type(tCurrencies) == "table" then
+			for _, tCur in ipairs(tCurrencies) do
+				local tCurName
+				local tOk, _, _, tTypesID = pcall(C_Traits.GetTraitCurrencyInfo, tCur.traitCurrencyID)
+				if tOk and tTypesID and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo then
+					local tCi = C_CurrencyInfo.GetCurrencyInfo(tTypesID)
+					tCurName = tCi and tCi.name
+				end
+				tTalentText(aParentChilds, "Text: " .. (tCurName or _G.TALENTS or "Talents") .. ": " .. tostring(tCur.quantity or 0), nil)
+			end
+		end
+	end
+
+	-- Anwenden / Verwerfen / Zuruecksetzen
+	local tApply = aTalentsFrame.ApplyButton
+	if tApply and tApply:IsShown() then
+		local tLabel = tApply:GetText() or _G.TALENT_FRAME_APPLY_BUTTON_TEXT or "Apply"
+		if not tApply:IsEnabled() then tLabel = tLabel .. " (" .. L["disabled"] .. ")" end
+		tSpellsFrameAction(aParentChilds, tLabel, tApply:IsEnabled() and tSpellsFrameClick(tApply) or nil)
+	end
+	local tUndo = aTalentsFrame.UndoButton
+	if tUndo and tUndo:IsShown() and tUndo:IsEnabled() then
+		tSpellsFrameAction(aParentChilds, _G.UNDO or "Undo", tSpellsFrameClick(tUndo))
+	end
+
+	-- Knoten sammeln und nach Reihe, Spalte ordnen
+	local tNodes = {}
+	for tButton in aTalentsFrame:EnumerateAllTalentButtons() do
+		local tInfo = tButton.GetNodeInfo and tButton:GetNodeInfo()
+		if tInfo and tInfo.isVisible ~= false and tInfo.posX and tInfo.posY then
+			tNodes[#tNodes + 1] = { button = tButton, info = tInfo }
+		end
+	end
+	table.sort(tNodes, function(a, b)
+		if a.info.posY ~= b.info.posY then return a.info.posY < b.info.posY end
+		return a.info.posX < b.info.posX
+	end)
+	-- Diagnose (einmal je Sitzung): Aufbau des Baums, um Gruppen/Aeste zu erkennen.
+	if not SkuCore.talentTreeDumped and #tNodes > 0 then
+		SkuCore.talentTreeDumped = true
+		dprint("TalentTree", "treeID", tostring(tTreeID), "configID", tostring(tConfigID), "nodes", #tNodes)
+		local tTreeInfo = tTreeID and C_Traits.GetTreeInfo and C_Traits.GetTreeInfo(tConfigID, tTreeID)
+		if tTreeInfo then dprint("TalentTree", "treeInfo", tostring(tTreeInfo.name), "gates", tostring(tTreeInfo.gates and #tTreeInfo.gates)) end
+		for i, tNode in ipairs(tNodes) do
+			local tInfo = tNode.info
+			local tName = tSpellsFrameEntryInfo(tConfigID, (tInfo.activeEntry and tInfo.activeEntry.entryID) or (tInfo.entryIDs and tInfo.entryIDs[1])) or "?"
+			dprint("TalentNode", i, "x", tostring(tInfo.posX), "y", tostring(tInfo.posY), "type", tostring(tInfo.type),
+				"rank", tostring(tInfo.currentRank) .. "/" .. tostring(tInfo.maxRanks), "sub", tostring(tInfo.subTreeID),
+				"groups", tostring(tInfo.groupIDs and table.concat(tInfo.groupIDs, ",")), tName)
+		end
+	end
+	-- Aeste (Tierherrschaft / Treffsicherheit / Ueberleben): Das Spiel kennt sie als "Gruppen" des Baums
+	-- (C_Traits.GetGroupDisplayInfoByTreeID). Jeder Knoten traegt seine Gruppen-IDs; die erste, die ein Ast ist,
+	-- bestimmt den Ast. Ohne Astdaten bleibt es bei der flachen Liste.
+	local tBranches, tBranchByGroup = {}, {}
+	if tTreeID and C_Traits.GetGroupDisplayInfoByTreeID then
+		local tOkG, tInfos = pcall(C_Traits.GetGroupDisplayInfoByTreeID, tTreeID)
+		if tOkG and type(tInfos) == "table" then
+			for _, tG in ipairs(tInfos) do
+				if tG.groupID and tG.displayName and tG.displayName ~= "" then
+					local tBranch = { name = tG.displayName, order = tG.orderIndex or 0, nodes = {}, points = 0 }
+					tBranches[#tBranches + 1] = tBranch
+					tBranchByGroup[tG.groupID] = tBranch
+				end
+			end
+			table.sort(tBranches, function(a, b) return a.order < b.order end)
+		end
+	end
+	local tLoose = {}
+	for _, tNode in ipairs(tNodes) do
+		local tBranch
+		for _, tGroupID in ipairs(tNode.info.groupIDs or {}) do
+			if tBranchByGroup[tGroupID] then tBranch = tBranchByGroup[tGroupID] break end
+		end
+		if tBranch then
+			tBranch.nodes[#tBranch.nodes + 1] = tNode
+			tBranch.points = tBranch.points + (tNode.info.currentRank or 0)
+		else
+			tLoose[#tLoose + 1] = tNode
+		end
+	end
+	for _, tBranch in ipairs(tBranches) do
+		if #tBranch.nodes > 0 then
+			local tBranchEntry = tTalentAdd(aParentChilds, L["Tab"] .. " " .. tBranch.name .. " (" .. tBranch.points .. ")", {
+				frameName = "PlayerSpellsFrameBranch",
+				RoC = "Child",
+				type = "Button",
+				obj = _G["PlayerSpellsFrame"],
+				textFull = "",
+				childs = {},
+			})
+			for _, tNode in ipairs(tBranch.nodes) do
+				tTalentSafe(tSpellsFrameNodeEntry, tBranchEntry.childs, aTalentsFrame, tConfigID, tNode.button, tNode.info)
+			end
+		end
+	end
+	for _, tNode in ipairs(tLoose) do
+		tTalentSafe(tSpellsFrameNodeEntry, aParentChilds, aTalentsFrame, tConfigID, tNode.button, tNode.info)
+	end
+end
+
+local function tBuildPlayerSpellsFrame(aParentChilds)
+	local tFrame = _G["PlayerSpellsFrame"]
+	if not tFrame then return end
+
+	-- Reiter
+	local tCurrentTab = tFrame.GetTab and tFrame:GetTab()
+	local tTabs = {
+		{ id = tFrame.specTabID, text = _G.TALENT_FRAME_TAB_LABEL_SPEC or _G.SPECIALIZATION },
+		{ id = tFrame.talentTabID, text = _G.TALENT_FRAME_TAB_LABEL_TALENTS or _G.TALENTS },
+		{ id = tFrame.spellBookTabID, text = _G.TALENT_FRAME_TAB_LABEL_SPELLBOOK or _G.SPELLBOOK },
+	}
+	for _, tTab in ipairs(tTabs) do
+		if tTab.id and tFrame.IsTabAvailable and tFrame:IsTabAvailable(tTab.id) then
+			local tLabel = L["Tab"] .. " " .. tostring(tTab.text or tTab.id)
+			local tSelected = (tCurrentTab == tTab.id)
+			if tSelected then tLabel = tLabel .. " (" .. L["selected"] .. ")" end
+			local tId = tTab.id
+			tSpellsFrameAction(aParentChilds, tLabel, (not tSelected) and function() tFrame:SetTab(tId) end or nil)
+		end
+	end
+
+	-- Spezialisierung (Tierherrschaft, Treffsicherheit, ...) immer erreichbar, auch wenn der Reiter fehlt.
+	local tSpecAvailable, tSpecReason = C_SpecializationInfo.CanPlayerUseTalentSpecUI()
+	local tSpecNode = tTalentAdd(aParentChilds, _G.SPECIALIZATION or "Specialization", {
+		frameName = "PlayerSpellsFrameSpecs",
+		RoC = "Child",
+		type = "Button",
+		obj = tFrame,
+		textFull = "",
+		childs = {},
+	})
+	if tSpecAvailable == false and tSpecReason and tSpecReason ~= "" then
+		tTalentText(tSpecNode.childs, "Text: " .. tSpecReason, tFrame)
+	end
+	tTalentSafe(tSpellsFrameSpecSection, tSpecNode.childs, tFrame.SpecFrame)
+
+	if tCurrentTab == tFrame.specTabID and tFrame.SpecFrame then
+		-- Inhalt steht schon im Untermenue oben
+	elseif tCurrentTab == tFrame.talentTabID and tFrame.TalentsFrame then
+		tTalentSafe(tSpellsFrameTalentsSection, aParentChilds, tFrame.TalentsFrame)
+	end
+	-- Reiter Zauberbuch: Inhalt folgt (eigenes Menue noetig)
+end
+
+-- Diagnose: welche Fenster oeffnet das Spiel ueber das Panel-System? (steht im Debug-Ring als "ShowUIPanel")
+if _G.hooksecurefunc and _G.ShowUIPanel then
+	pcall(hooksecurefunc, "ShowUIPanel", function(aFrame)
+		local tOk, tName = pcall(function() return aFrame and aFrame.GetName and aFrame:GetName() end)
+		if tOk and tName and not string.find(tName, "^Container") then dprint("ShowUIPanel", tName) end
+	end)
+end
+
+function SkuCore:Build_PlayerSpellsFrame(aParentChilds)
+	tTalentSafe(tBuildPlayerSpellsFrame, aParentChilds)
+	if #aParentChilds == 0 then
+		tTalentText(aParentChilds, "Text: " .. (L["Talents"] or "Talents"), _G["PlayerSpellsFrame"])
+	end
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
 -- Top-level dispatcher: if dual talent spec is unlocked (GetNumTalentGroups > 1),
 -- show both specs as top-level submenus. Otherwise keep the original flat
 -- UI-driven layout.
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuCore:Build_TalentFrame(aParentChilds)
+	-- [Forever] Mists-Talentfenster: eigener Builder (siehe tBuildMistsTalentUI). Sicherung: bleibt das
+	-- Menue leer, steht wenigstens eine Zeile da, statt dass nur der Oeffnen-Ton kommt.
+	if _G["PlayerTalentFrameTalents"] and _G["PlayerTalentFrameSpecialization"] then
+		tTalentSafe(tBuildMistsTalentUI, aParentChilds)
+		if #aParentChilds == 0 then
+			tTalentText(aParentChilds, "Text: " .. (L["Talents"] or "Talents"), _G["PlayerTalentFrame"])
+		end
+		return
+	end
 	local tNumGroups = tGetNumTalentGroups()
 	-- Note: dual talent specialization is officially a WotLK 3.1 feature,
 	-- but custom servers (e.g. this Anniversary TBC build) backport it.
@@ -3300,6 +3858,29 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 			end
 		end
 
+		-- [Forever] Es gibt keine Skill-Liste mehr (GetNumSkillLines ist nur ein Leer-Shim, siehe Core.lua).
+		-- Berufe kommen aus Blizzards Berufe-Buch: GetProfessions() -> Haupt 1, Haupt 2, Archaeologie, Angeln,
+		-- Kochen; GetProfessionInfo(i) -> name, icon, rank, maxRank, numSpells, spellOffset, skillLine.
+		if #tProfs == 0 and Sku.isForever and _G.GetProfessions and _G.GetProfessionInfo then
+			local tRes = { pcall(_G.GetProfessions) }
+			if tRes[1] then
+				for tPos = 2, 6 do
+					if tRes[tPos] then
+						local tName, _, tRank, tMaxRank, _, _, tSkillLine = GetProfessionInfo(tRes[tPos])
+						if tName then
+							tProfs[#tProfs + 1] = {
+								name        = tName,
+								rank        = tRank,
+								max         = tMaxRank,
+								isSecondary = (tPos >= 4),
+								skillLine   = tSkillLine,
+								forever     = true,
+							}
+						end
+					end
+				end
+			end
+		end
 		if #tProfs == 0 then
 			-- Hinweistext, falls (noch) keine Berufe erlernt sind.
 			local tName = L["Keine Berufe erlernt"] or "Keine Berufe erlernt"
@@ -3318,8 +3899,10 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 				local pName  = p.name
 				local pSkill = p.rank
 				local pMax   = p.max
-				local pIsGathering = tGatheringProfessions[pName] == true
+				-- Forever: auch Bergbau/Kraeuterkunde/Kuerschnerei haben ein Handwerksfenster (ProfessionsFrame)
+				local pIsGathering = (not p.forever) and tGatheringProfessions[pName] == true
 				local pIsSecondary = p.isSecondary == true
+				local pSkillLine   = p.skillLine
 
 				-- Label: "Schneiderei 300 / 375"
 				local label = pName
@@ -3413,7 +3996,10 @@ function SkuCore:Build_CharacterFrame(aParentChilds)
 										-- Liste (Reihenfolge kann sich
 										-- zwischen Menü-Aufbau und Bestätigung
 										-- verschieben).
-										if _G.AbandonSkill and _G.GetNumSkillLines
+										if pSkillLine and _G.C_SkillInfo and _G.C_SkillInfo.AbandonSkill then
+											-- Forever: Blizzard verlernt per Skill-Line-ID (SpellBookProfessions.lua)
+											pcall(_G.C_SkillInfo.AbandonSkill, pSkillLine)
+										elseif _G.AbandonSkill and _G.GetNumSkillLines
 											and _G.GetSkillLineInfo then
 											if _G.ExpandSkillHeader then
 												pcall(_G.ExpandSkillHeader, 0)
@@ -4855,6 +5441,9 @@ function SkuCore:Build_PetStableFrame(aParentChilds)
 	end
 
 	local function tCurrentPetInfo()
+		-- WoW Forever/Camelot: stable slot 1 is the current pet and carries the loyalty too.
+		local tSlot1 = tPetInfo(1)
+		if tSlot1.exists then return tSlot1 end
 		local tName = UnitName("pet")
 		if not tName then
 			-- A pet selected at the stable can be current but dismissed. Blizzard's
@@ -4895,25 +5484,46 @@ function SkuCore:Build_PetStableFrame(aParentChilds)
 		-- Informational: selecting a stored pet performs the complete swap.
 	}
 
-	for x = 1, NUM_PET_STABLE_SLOTS do
+	-- Forever: the stable window has exactly two stabled-pet buttons (PetStableStabledPet1/2).
+	local tNumStabled = 2
+	for x = 1, tNumStabled do
 		local tPet = tPetInfo(x + 1)
 		if _G["PetStableStabledPet"..x] and _G["PetStableStabledPet"..x]:IsEnabled() == true then
 			local tFrame = _G["PetStableStabledPet"..x]
 			local tText, tFullText = tPetText(tPet)
+			-- WoW Forever/Camelot: an EMPTY stall takes the current pet (Blizzard: drag slot 1 onto
+			-- it = C_StableInfo.SetPetSlot(1, stall)); a filled one swaps with the current pet.
+			local tCanStable = (not tPet.exists) and tCurrentPet.exists and _G.C_StableInfo and _G.C_StableInfo.SetPetSlot and true or false
+			local tStableHint = tCanStable and (", " .. Sku.deEn("Eingeben stallt den Begleiter ein", "Enter stables the pet", "Entrée met le familier à l'écurie")) or ""
 			table.insert(aParentChilds, L["Stall "..x])
 			aParentChilds[L["Stall "..x]] = {
 				frameName = "PetStableStabledPet"..x,
 				RoC = "Child",
 				type = "Button",
 				obj = tFrame,
-				textFirstLine = L["Stall "..x].." "..tText,
-				textFull = L["Stall "..x].." "..tFullText,
+				textFirstLine = L["Stall "..x].." "..tText..tStableHint,
+				textFull = L["Stall "..x].." "..tFullText..tStableHint,
 				childs = {},
-				directAction = tPet.exists,
+				directAction = tPet.exists or tCanStable,
 				-- Same pickup/drop sequence as Blizzard's stable UI.
-				macrotext = tPet.exists and ("/run if GetCursorInfo() then ClearCursor() end; PickupStablePet("..(x + 1).."); ClickStablePet(1)") or nil,
-				func = tPet.exists and function()
+				macrotext = tCanStable and ("/run if GetCursorInfo() then ClearCursor() end; C_StableInfo.SetPetSlot(1, "..(x + 1)..")")
+						or tPet.exists and (_G.C_StableInfo and _G.C_StableInfo.SetPetSlot
+						and ("/run if GetCursorInfo() then ClearCursor() end; C_StableInfo.SetPetSlot("..(x + 1)..", 1)")
+						or ("/run if GetCursorInfo() then ClearCursor() end; PickupStablePet("..(x + 1).."); ClickStablePet(1)")) or nil,
+				func = (tPet.exists or tCanStable) and function()
 					if not _G.PetStableFrame or not _G.PetStableFrame:IsShown() then return end
+					if tCanStable then
+						local tPetName = tCurrentPet.name
+						C_Timer.After(0.8, function()
+							local tIcon = GetStablePetInfo(x + 1)
+							pcall(function()
+								SkuOptions.Voice:OutputStringBTtts(tIcon
+									and (Sku.deEn("Begleiter eingestallt", "Pet stabled", "Familier mis à l'écurie")..": "..tostring(tPetName))
+									or Sku.deEn("Begleiter konnte nicht eingestallt werden", "Pet could not be stabled", "Le familier n'a pas pu être mis à l'écurie"), false, false, 0.2)
+							end)
+						end)
+						return
+					end
 					SkuCore.petStablePendingSwap = {
 						name = tPet.name,
 						level = tPet.level,
@@ -4925,8 +5535,8 @@ function SkuCore:Build_PetStableFrame(aParentChilds)
 		end
 	end
 
-	local tFrame = _G["PetStablePurchaseButton"]
-	if tFrame:IsEnabled() == true then --IsMouseClickEnabled()
+	local tFrame = _G["PetStablePurchaseButton"] or (_G.PetStableFrame and _G.PetStableFrame.purchaseButton) -- Forever: child key, no global name
+	if tFrame and tFrame:IsEnabled() == true then --IsMouseClickEnabled()
 		if tFrame:IsShown() == true then --IsMouseClickEnabled()
 			table.insert(aParentChilds, L["Weiteren Platz kaufen"])
 			aParentChilds[L["Weiteren Platz kaufen"]] = {

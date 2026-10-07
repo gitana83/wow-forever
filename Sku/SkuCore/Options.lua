@@ -841,7 +841,7 @@ local function tRebindCaptureCommand(self, aSecondary)
 
 					dprint("CmdBind after SetBinding", "command=", self.command, "aKey=", aKey,
 						"GetBindingKey=", GetBindingKey(self.command), "bindingSet=", GetCurrentBindingSet())
-					local tCommand, tCategory, tKey1, tKey2 = GetBinding(self.index, GetCurrentBindingSet())
+					local tCommand, tCategory, tKey1, tKey2 = SkuCore:GetBindingByCommand(self.command, self.index)
 					dprint("CmdBind readback", "idx=", self.index, "gotCommand=", tCommand, "tKey1=", tKey1, "tKey2=", tKey2, "matchesTarget=", tCommand == self.command)
 					local aFriendlyKey1, tFriendlyKey2 = tKey1 or L["nichts"], tKey2 or L["nichts"]
 					for kLocKey, vLocKey in pairs(SkuCore.Keys.LocNames) do
@@ -1021,7 +1021,7 @@ local function KeyBindingKeyMenuEntryHelper(self, aValue, aName)
 	elseif aName == L["Belegung löschen"] then
 		if not self.command or not self.category or not self.index then return end
 		SkuCore:DeleteBinding(self.command)
-		local tCommand, tCategory, tKey1, tKey2 = GetBinding(self.index, GetCurrentBindingSet())
+		local tCommand, tCategory, tKey1, tKey2 = SkuCore:GetBindingByCommand(self.command, self.index)
 		local aFriendlyKey1, tFriendlyKey2
 		self.name = _G["BINDING_NAME_" .. tCommand]..L[" Taste 1: "]..(aFriendlyKey1 or L["nichts"])..L[" Taste 2: "]..(tFriendlyKey2 or L["nichts"])
 		_G["OnSkuOptionsMainOption1"]:GetScript("OnClick")(_G["OnSkuOptionsMainOption1"], "RIGHT")
@@ -1030,7 +1030,7 @@ local function KeyBindingKeyMenuEntryHelper(self, aValue, aName)
 	elseif aName == L["Sekundäre Belegung löschen"] then
 		if not self.command or not self.category or not self.index then return end
 		SkuCore:DeleteBinding2(self.command)
-		local tCommand, tCategory, tKey1, tKey2 = GetBinding(self.index, GetCurrentBindingSet())
+		local tCommand, tCategory, tKey1, tKey2 = SkuCore:GetBindingByCommand(self.command, self.index)
 		local aFriendlyKey1, tFriendlyKey2 = tKey1 or L["nichts"], tKey2 or L["nichts"]
 		for kLocKey, vLocKey in pairs(SkuCore.Keys.LocNames) do
 			aFriendlyKey1 = gsub(aFriendlyKey1, kLocKey, vLocKey)
@@ -1518,7 +1518,8 @@ local function ActionBarMenuBuilder(aParentEntry, aActionBarName, aBooktype)
 					ClearCursor()
 					if self.spellID then
 						PickupSpell(self.spellID)
-						if CursorHasSpell() then
+						local tHasSpell = CursorHasSpell()
+						if tHasSpell then
 							PlaceAction(self.buttonObj.action)
 							ClearCursor()
 						end
@@ -1586,7 +1587,14 @@ local function ActionBarMenuBuilder(aParentEntry, aActionBarName, aBooktype)
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+local PetActionBarMenuBuilderInner
 local function PetActionBarMenuBuilder(aParentEntry, aActionBarName, aBooktype)
+	-- WoW Forever/Camelot: an error in here is swallowed by the menu code and the bar just stays
+	-- silent, so catch it and write it to the log.
+	local tOk, tErr = xpcall(PetActionBarMenuBuilderInner, function(aMsg) return tostring(aMsg) .. " | " .. tostring(debugstack and debugstack(2, 4, 0) or "") end, aParentEntry, aActionBarName, aBooktype)
+	if not tOk then dprint("PetBar", "FEHLER im Aufbau", tostring(tErr)) end
+end
+PetActionBarMenuBuilderInner = function(aParentEntry, aActionBarName, aBooktype)
 	if not aParentEntry or not aActionBarName then return end
 
 	local tButtonsWithCurrentPetControlAction = {
@@ -1598,8 +1606,21 @@ local function PetActionBarMenuBuilder(aParentEntry, aActionBarName, aBooktype)
 		PET_ACTION_FOLLOW = -1,
 	}
 
-	for x = 1, NUM_PET_ACTION_SLOTS do
-		local tButtonObj = _G[tActionBarData[aActionBarName].buttonName..x]
+	-- WoW Forever/Camelot: the buttons may not exist as globals (or not yet); fall back to the
+	-- bar's own button list, last resort a stub that only knows its slot id.
+	local function tPetButton(x)
+		local tObj = _G[tActionBarData[aActionBarName].buttonName..x]
+		if not tObj and _G.PetActionBar and type(_G.PetActionBar.actionButtons) == "table" then
+			tObj = _G.PetActionBar.actionButtons[x]
+		end
+		if not tObj then
+			tObj = { GetID = function() return x end, GetName = function() return tActionBarData[aActionBarName].buttonName..x end }
+		end
+		return tObj
+	end
+
+	for x = 1, (NUM_PET_ACTION_SLOTS or 10) do
+		local tButtonObj = tPetButton(x)
 		if tButtonObj then
 			local name = GetPetActionInfo(x)
 			if name and tButtonsWithCurrentPetControlAction[name] then
@@ -1608,29 +1629,40 @@ local function PetActionBarMenuBuilder(aParentEntry, aActionBarName, aBooktype)
 		end
 	end
 
-	for x = 1, NUM_PET_ACTION_SLOTS do
-		local tButtonObj = _G[tActionBarData[aActionBarName].buttonName..x]
+	for x = 1, (NUM_PET_ACTION_SLOTS or 10) do
+		local tButtonObj = tPetButton(x)
 		if tButtonObj then
 			local name, texture, isToken, isActive, autoCastAllowed, autoCastEnabled, spellID = GetPetActionInfo(x);
-			local tButtonName = ButtonContentNameHelper("pet", x, subType, aActionBarName, x) --_G[name] or name or L["empty"] 
+			local tButtonName = ButtonContentNameHelper("pet", x, subType, aActionBarName, x) --_G[name] or name or L["empty"]
 			local tNewMenuEntry = SkuOptions:InjectMenuItems(aParentEntry, {L["Button"].." "..x..";"..tButtonName}, SkuGenericMenuItem)
 			tNewMenuEntry.dynamic = true
 			tNewMenuEntry.isSelect = true
-			tNewMenuEntry.buttonObj = _G[tActionBarData[aActionBarName].buttonName..x]
+			tNewMenuEntry.buttonObj = tButtonObj
 			tNewMenuEntry.id = x
 			tNewMenuEntry.OnEnter = function(self, aValue, aName)
 				self.spellID = nil
 				self.itemID = nil
 				self.macroID = nil
 				if self.buttonObj:GetID() and name then
-					SkuUtil:ResetScanningTooltip()
-					_G["SkuScanningTooltip"]:SetPetAction(x)
-					if TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()) ~= "asd" then
-						if TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()) ~= "" then
-							local tText = SkuUtil:Unescape(TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()))
+					-- pcall: an error here used to be swallowed and left the slot silent.
+					-- WoW Forever/Camelot: the scanning tooltip has neither SetPetAction nor
+					-- SetHyperlink; the tooltip text comes from C_TooltipInfo.GetPetAction.
+					local tOk, tErr = pcall(function()
+						local tData = _G.C_TooltipInfo and _G.C_TooltipInfo.GetPetAction and _G.C_TooltipInfo.GetPetAction(x)
+						local tParts = {}
+						if tData and type(tData.lines) == "table" then
+							for _, tLine in ipairs(tData.lines) do
+								local tLeft = tLine.leftText
+								if type(tLeft) == "string" and not (_G.issecretvalue and _G.issecretvalue(tLeft)) and tLeft ~= "" then
+									tParts[#tParts + 1] = tLeft
+								end
+							end
+						end
+						if #tParts > 0 then
+							local tText = SkuUtil:Unescape(table.concat(tParts, "\r\n"))
 							SkuOptions.currentMenuPosition.textFirstLine, SkuOptions.currentMenuPosition.textFull = SkuCore:ItemName_helper(tText)
 						end
-					end
+					end)
 				end
 			end
 			tNewMenuEntry.OnAction = function(self, aValue, aName)
@@ -2432,6 +2464,17 @@ function SkuCore.ActionBarsMenuBuilder(self)
 	if not tHasPet and _G["PetActionBarFrame"] and _G["PetActionBarFrame"]:IsShown() == true then
 		tHasPet = true
 	end
+	-- WoW Forever/Camelot: the bar frame is called PetActionBar now (PetActionBarFrame is gone),
+	-- and a slot that holds an action is the surest sign of a usable pet bar.
+	if not tHasPet and _G["PetActionBar"] and _G["PetActionBar"].IsShown and _G["PetActionBar"]:IsShown() == true then
+		tHasPet = true
+	end
+	if not tHasPet and _G.GetPetActionInfo then
+		for x = 1, (_G.NUM_PET_ACTION_SLOTS or 10) do
+			local ok, v = pcall(_G.GetPetActionInfo, x)
+			if ok and v then tHasPet = true break end
+		end
+	end
 	if tHasPet then
 		local tNewMenuEntry = SkuOptions:InjectMenuItems(self, {tActionBarData["PetBar"].friendlyName}, SkuGenericMenuItem)
 		tNewMenuEntry.dynamic = true
@@ -2962,7 +3005,7 @@ function SkuCore:MenuBuilder(aParentEntry)
 				"SKU_KEY_TARGETDISTANCE", "SKU_KEY_TARGETHEALTH", "SKU_KEY_OUTPUTHARDTARGET", "SKU_KEY_OUTPUTSOFTTARGET",
 				"SKU_KEY_OUTPUTTARGETTOOLTIP",
 				"SKU_KEY_ENABLESOFTTARGETINGENEMY", "SKU_KEY_ENABLESOFTTARGETINGFRIENDLY", "SKU_KEY_ENABLESOFTTARGETINGINTERACT",
-				"SKU_KEY_QUESTTARGET", }, },
+				"SKU_KEY_QUESTTARGET", "SKU_KEY_PETHEALTH", }, },
 			{ label = L["Navigation und Wegpunkte"], members = {
 				"SKU_KEY_SELECTNEXTBASEWAYPOINT", "SKU_KEY_MOVETONEXTWP", "SKU_KEY_MOVETOPREVWP", "SKU_KEY_ADDLARGEWP",
 				"SKU_KEY_ADDSMALLWP", "SKU_KEY_STARTRRFOLLOW", "SKU_KEY_STOPROUTEORWAYPOINT", "SKU_KEY_TOGGLEREACHRANGE",
@@ -3208,6 +3251,10 @@ function SkuCore:MenuBuilder(aParentEntry)
 				-- working when it is off.
 				if SkuCore.PitchLockAutoMenuBuilder then
 					SkuCore.PitchLockAutoMenuBuilder(self)
+				end
+				-- Hold-to-repeat casting (Blizzard CVar ActionButtonUseKeyHeldSpell).
+				if SkuCore.HoldCastMenuBuilder then
+					SkuCore.HoldCastMenuBuilder(self)
 				end
 			end },
 		-- Blizzard's audio assistance (screen reader + combat call-outs: health, resources,

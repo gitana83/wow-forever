@@ -458,6 +458,21 @@ if not _G.CursorHasSpell then
 	_G.CursorHasSpell = function() return (GetCursorInfo()) == "spell" end
 end
 
+-- WoW Forever/Camelot: the stable (Blizzard_StableUI/Camelot) only offers C_StableInfo. The old
+-- global GetStablePetInfo(slot) returned icon, name, level, family, loyalty; slot 1 is the
+-- current pet, 2 and 3 the stabled ones (same numbering as before).
+if not _G.GetStablePetInfo and type(_G.C_StableInfo) == "table" and type(_G.C_StableInfo.GetStablePetInfo) == "function" then
+	_G.GetStablePetInfo = function(aSlot)
+		local tOk, tInfo = pcall(_G.C_StableInfo.GetStablePetInfo, aSlot)
+		if not tOk or type(tInfo) ~= "table" then return nil end
+		return tInfo.icon, tInfo.name, tInfo.level, tInfo.familyName, tInfo.loyaltyName
+	end
+end
+if type(_G.NUM_PET_STABLE_SLOTS) ~= "number" then
+	local tMax = _G.Constants and Constants.PetConsts and Constants.PetConsts.MAX_STABLE_SLOTS
+	_G.NUM_PET_STABLE_SLOTS = type(tMax) == "number" and tMax or 2
+end
+
 -- WoW Forever/Camelot no longer defines the spellbook type constants. Without them the
 -- action bar menus passed nil and skipped the spellbook list entirely.
 if _G.BOOKTYPE_SPELL == nil then _G.BOOKTYPE_SPELL = "spell" end

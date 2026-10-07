@@ -390,6 +390,7 @@ SkuCore.interactFramesListManual = {
 	["MerchantFrame"] = function(...) SkuCore:Build_MerchantFrame(...) end,
 	["CharacterFrame"] = function(...) SkuCore:Build_CharacterFrame(...) end,
 	["PlayerTalentFrame"] = function(...) SkuCore:Build_TalentFrame(...) end,
+	["PlayerSpellsFrame"] = function(...) SkuCore:Build_PlayerSpellsFrame(...) end,
 	["RolePollPopup"] = function(...) SkuCore:Build_RolePollPopup(...) end,
 	-- ReadyCheckFrame is only a wrapper around ReadyCheckListenerFrame; walked
 	-- generically that wrapper becomes an extra menu level and the Yes/No buttons
@@ -431,6 +432,7 @@ SkuCore.interactFramesList = {
 	"SkillFrame",
 	"HonorFrame",
 	"PlayerTalentFrame",
+	"PlayerSpellsFrame",
 	"InspectFrame",
 	"GuildBankFrame",
 	--"BankFrame",
@@ -1000,6 +1002,52 @@ function SkuCore.PitchLockAutoMenuBuilder(aParentEntry)
          SkuSettings:Set("SkuCore", "pitchLockAuto", false)
       elseif aName == L["Yes"] then
          SkuSettings:Set("SkuCore", "pitchLockAuto", true)
+      end
+   end
+   SkuOptions:MakeInPlaceToggle(tNewMenuEntry, L["No"], L["Yes"])
+end
+
+-- Einstellungen -> Allgemein: "Dauer casten (Taste halten)". Blizzards eigene Option
+-- "Halten zum Casten" (CVar ActionButtonUseKeyHeldSpell, Barrierefreiheit): wer die
+-- Taste einer Aktionsleiste gedrueckt haelt, castet den Zauber immer wieder, sobald er
+-- wieder bereit ist - ohne jedes Mal neu zu druecken. Der CVar wird vom Spiel selbst
+-- gespeichert (Config.wtf), Sku haelt keinen eigenen Wert.
+local function tHoldCastGet()
+   local tOk, tValue = pcall(C_CVar.GetCVar, "ActionButtonUseKeyHeldSpell")
+   if tOk and tValue ~= nil then
+      return tValue == "1" or tValue == 1 or tValue == true
+   end
+   return nil
+end
+
+function SkuCore.HoldCastMenuBuilder(aParentEntry)
+   local tNewMenuEntry = SkuOptions:InjectMenuItems(aParentEntry, {
+      Sku.deEn("Dauer casten: Taste gedrückt halten wiederholt den Zauber",
+         "Continuous casting: hold the key to repeat the spell",
+         "Lancement continu : maintenir la touche répète le sort"),
+   }, SkuGenericMenuItem)
+   tNewMenuEntry.sorting = true
+   tNewMenuEntry.GetCurrentValue = function(self, aValue, aName)
+      if tHoldCastGet() == true then
+         return L["Yes"]
+      else
+         return L["No"]
+      end
+   end
+   tNewMenuEntry.OnAction = function(self, aValue, aName)
+      local tNew
+      if aName == L["No"] then
+         tNew = "0"
+      elseif aName == L["Yes"] then
+         tNew = "1"
+      else
+         return
+      end
+      local tOk, tResult = pcall(C_CVar.SetCVar, "ActionButtonUseKeyHeldSpell", tNew)
+      if not tOk or tResult == false or tHoldCastGet() == nil then
+         SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Diese Option gibt es auf diesem Client nicht",
+            "This option does not exist on this client",
+            "Cette option n'existe pas sur ce client"), true, true, 0.3, true)
       end
    end
    SkuOptions:MakeInPlaceToggle(tNewMenuEntry, L["No"], L["Yes"])
@@ -1680,6 +1728,19 @@ end)
 ---------------------------------------------------------------------------------------------------------------------------------------
 SkuCore.PetHappinessString = {[1] = L["Unhappy"], [2] = L["Content "], [3] = L["Happy"]}
 
+-- [Forever] GetPetHappiness ist kein Global mehr, sondern C_PetInfo.GetPetHappiness (Skala 1 unzufrieden,
+-- 2 neutral, 3 gluecklich). Der alte Aufruf warf 974 Fehler in Folge, sobald ein Pet da war. Liefert nur
+-- eine Zahl 1..3 oder nil, nie einen Fehler.
+function SkuCore:GetPetHappinessSafe()
+	local tFunc = _G.GetPetHappiness or (_G.C_PetInfo and _G.C_PetInfo.GetPetHappiness)
+	if not tFunc then return nil end
+	local tOk, tHappiness = pcall(tFunc)
+	if tOk and type(tHappiness) == "number" and SkuCore.PetHappinessString[tHappiness] then
+		return tHappiness
+	end
+	return nil
+end
+
 ---Check whether player is a hunter
 ---@return boolean
 function SkuCore:PlayerIsHunter()
@@ -1839,7 +1900,7 @@ function SkuCore:OnEnable()
 		then
 			SkuCoreOldPetHappinessCounter = SkuCoreOldPetHappinessCounter + time
 			if SkuCoreOldPetHappinessCounter > 2 then
-				local happiness = GetPetHappiness()
+				local happiness = SkuCore:GetPetHappinessSafe()
 				-- speak pet happiness
 				if happiness and (
 					-- either happiness has just increased due to feeding, so let player know new happiness level
@@ -4780,6 +4841,7 @@ local friendlyFrameNames = {
 	--["BagnonInventoryFrame1"] = L["Bagnon Taschen"],
 	["SpellBookFrame"] = L["Spellbook"],
 	["PlayerTalentFrame"] = L["Talents"],
+	["PlayerSpellsFrame"] = L["Talents"],
 	["RolePollPopup"] = L["Role Poll"],
 	-- ["PVEFrame"]/["LFGParentFrame"] entfernt (Dungeon-Browser wird neu aufgebaut)
 	["ItemSocketingFrame"] = L["Sockeln"],
@@ -5765,6 +5827,24 @@ function SkuCore:DeleteBinding(aCommand)
 	end
 
 	SkuCore:SaveBindings()
+end
+
+-------------------------------------------------------------------------------------------------
+-- Tasten eines Befehls NACH dem Binden auslesen. GetBinding(index) ist dafuer ungeeignet: die Bindungsliste
+-- verschiebt sich beim Binden (Forever), der alte Index lieferte den NACHBAR-Befehl - Folge: nach "Strg F5" auf
+-- Aktionsleiste 2 Taste 5 sagte die Sprachausgabe "Strg F4". Massgeblich ist der Befehlsname (GetBindingKey).
+-- Liefert wie GetBinding: Befehl, Kategorie, Taste1, Taste2.
+function SkuCore:GetBindingByCommand(aCommand, aIndexHint)
+	if not aCommand then
+		return GetBinding(aIndexHint, GetCurrentBindingSet())
+	end
+	local tKey1, tKey2 = GetBindingKey(aCommand)
+	local tCategory
+	if aIndexHint then
+		local tIdxCommand, tIdxCategory = GetBinding(aIndexHint, GetCurrentBindingSet())
+		if tIdxCommand == aCommand then tCategory = tIdxCategory end
+	end
+	return aCommand, tCategory, tKey1, tKey2
 end
 
 -------------------------------------------------------------------------------------------------

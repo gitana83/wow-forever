@@ -137,10 +137,7 @@ local function tGetZoneDistance(aCtx, aNpcId)
 	end
 	if not tBestX then return nil end
 
-	local tOkWorld, _, tWorldPos = pcall(C_Map.GetWorldPosFromMapPos, aCtx.uiMapId,
-		CreateVector2D(tonumber(tBestX) / 100, tonumber(tBestY) / 100))
-	if not tOkWorld or not tWorldPos then return nil end
-	local tX, tY = tWorldPos:GetXY()
+	local tX, tY = SkuNav:WorldFromMap(aCtx.uiMapId, tonumber(tBestX) / 100, tonumber(tBestY) / 100)
 	if not tX then return nil end
 	local tOkDist, tDist = pcall(SkuNav.Geo.Distance, SkuNav.Geo, aCtx.playerX, aCtx.playerY, tX, tY)
 	return (tOkDist and tDist) or nil
@@ -165,10 +162,8 @@ local function tGetNpcDistance(aCtx, aNpcId)
 			if tOkArea and tAreaContinentId == aCtx.continentId then
 				local tOkUiMap, tUiMapId = pcall(SkuNav.Geo.GetUiMapIdFromAreaId, SkuNav.Geo, tAreaId)
 				if tOkUiMap and tUiMapId then
-					local tOkPos, _, tWorldPos = pcall(C_Map.GetWorldPosFromMapPos, tUiMapId,
-						CreateVector2D(tonumber(tSpawnX) / 100, tonumber(tSpawnY) / 100))
-					if tOkPos and tWorldPos then
-						local tX, tY = tWorldPos:GetXY()
+					local tX, tY = SkuNav:WorldFromMap(tUiMapId, tonumber(tSpawnX) / 100, tonumber(tSpawnY) / 100)
+					if tX then
 						if tX and tY then
 							local tOkDist, tDist = pcall(SkuNav.Geo.Distance, SkuNav.Geo, aCtx.playerX, aCtx.playerY, tX, tY)
 							if tOkDist and tDist and (not tBest or tDist < tBest) then

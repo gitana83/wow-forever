@@ -98,10 +98,7 @@ end
 ---------------------------------------------------------------------------------------------------------------------------------------
 -- Rueckgabe: Entfernung, Welt-X, Welt-Y des Zielpunktes.
 local function tWorldDistance(aCtx, aUiMapId, aMapX, aMapY)
-	local tOkWorld, _, tWorldPos = pcall(C_Map.GetWorldPosFromMapPos, aUiMapId,
-		CreateVector2D(tonumber(aMapX) / 100, tonumber(aMapY) / 100))
-	if not tOkWorld or not tWorldPos then return nil end
-	local tX, tY = tWorldPos:GetXY()
+	local tX, tY = SkuNav:WorldFromMap(aUiMapId, tonumber(aMapX) / 100, tonumber(aMapY) / 100)
 	if not tX then return nil end
 	local tOkDist, tDist = pcall(SkuNav.Geo.Distance, SkuNav.Geo, aCtx.playerX, aCtx.playerY, tX, tY)
 	if not tOkDist or not tDist then return nil end
