@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local MODULE_NAME = "SkuOptions"
@@ -984,6 +984,7 @@ function SkuOptions:UpdateOverviewText(aPageId)
 
 	--buffs/debuffs
 	local tBuffs = L["Buffs"]
+	local tBuffLikeDebuffs = { [1229451] = true }   -- Verbesserter Ruhebonus (vom Spiel als schaedlich markiert)
 	local tFound
 	for x = 1, 40  do
 		local name, icon, count, dispelType, duration, expirationTime, source, isStealable, nameplateShowPersonal, spellId, canApplyAura, isBossDebuff, castByPlayer, nameplateShowAll, timeMod = UnitBuff("player", x)
@@ -1162,6 +1163,28 @@ function SkuOptions:UpdateOverviewText(aPageId)
 	end
 
 
+	-- [Forever] Manche positiven Effekte stuft das Spiel selbst als schaedlich ein (Verbesserter Ruhebonus 1229451:
+	-- isHarmful=true). Sie gehoeren fuer Lena zu den Buffs: hier anhaengen, in der Debuff-Liste unten auslassen.
+	for x = 1, 40 do
+		local tOkB, name, _, _, _, _, expirationTime, _, _, _, spellId = pcall(UnitDebuff, "player", x)
+		if tOkB and name and spellId and tBuffLikeDebuffs[spellId] then
+			tFound = true
+			local tTimeString = ""
+			if type(expirationTime) == "number" and expirationTime > 0 then
+				local tRemainingSec = math.floor((expirationTime - GetTime()))
+				if tRemainingSec > 3600 then
+					tTimeString = (math.floor(tRemainingSec / 3600) + 1)..L[" Stunden"]
+				elseif tRemainingSec > 60 then
+					tTimeString = (math.floor(tRemainingSec / 60) + 1)..L[" Minuten"]
+				else
+					tTimeString = tRemainingSec..L[" Sekunden"]
+				end
+				tTimeString = ", "..tTimeString
+			end
+			tBuffs = tBuffs.."\r\n"..name..tTimeString
+		end
+	end
+
 	if not tFound then
 		tBuffs = tBuffs.."\r\n"..L["Keine"]
 	end
@@ -1173,7 +1196,7 @@ function SkuOptions:UpdateOverviewText(aPageId)
 	local tFound
 	for x = 1, 40  do
 		local name, icon, count, dispelType, duration, expirationTime, source, isStealable, nameplateShowPersonal, spellId, canApplyAura, isBossDebuff, castByPlayer, nameplateShowAll, timeMod = UnitDebuff("player", x)
-		if name then
+		if name and not (spellId and tBuffLikeDebuffs[spellId]) then
 			tFound = true
 			local tTimeString = ""
 			if expirationTime > 0 then
@@ -1380,9 +1403,10 @@ function SkuOptions:UpdateOverviewText(aPageId)
 		-- Trainingspunkte: frei = gesamt - vergeben.
 		-- [Forever] Weder GetPetTrainingPoints noch UnitCharacterPoints gibt es dort: der Aufruf von nil brach die
 		-- GANZE Uebersicht ab (nichts mehr auf Shift-Strg-Pfeil). Jeder Zweig ist jetzt vorhanden-geprueft.
-		if _G.GetPetTrainingPoints then
-			local tOkTp, tTotal, tSpent = pcall(_G.GetPetTrainingPoints)
-			if tOkTp then
+		local tGetTrainingPoints = _G.GetPetTrainingPoints or (_G.C_PetInfo and _G.C_PetInfo.GetPetTrainingPoints)
+		if tGetTrainingPoints then
+			local tOkTp, tTotal, tSpent = pcall(tGetTrainingPoints)
+			if tOkTp and type(tTotal) == "number" then
 				local tUnspent = (tTotal or 0) - (tSpent or 0)
 				petSection = petSection .. "\r\n" .. L["Unspent pet training points"]..": "..tUnspent
 			end
@@ -3990,6 +4014,12 @@ function SkuOptions:CreateMenuFrame()
 		-- [Forever] Berufe-Fenster (Retail-artiges Handwerksfenster) schliessen
 		if _G["ProfessionsFrame"] and _G["ProfessionsFrame"]:IsVisible() == true then
 			if _G.HideUIPanel then pcall(_G.HideUIPanel, _G["ProfessionsFrame"]) else _G["ProfessionsFrame"]:Hide() end
+		end
+
+		-- [Forever] Geselligkeitsfenster (SocialUIFrame) mit dem Menue schliessen, sonst bleibt es offen und
+		-- "Geselligkeit" taucht im Lokal-Menue neben jedem anderen Fenster (z. B. Berufe) auf.
+		if _G["SocialUIFrame"] and _G["SocialUIFrame"]:IsVisible() == true then
+			if _G.HideUIPanel then pcall(_G.HideUIPanel, _G["SocialUIFrame"]) else _G["SocialUIFrame"]:Hide() end
 		end
 
 		if _G["QuestFrameDetailPanel"]:IsVisible() == true then
@@ -7005,6 +7035,23 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 												tItemId = aGossipListTable[index].itemId or aGossipListTable.itemId
 											end
 											SkuOptions.db.char["SkuCore"].SellJunkCustomItemIds[tItemId] = true
+										end
+									end
+								end
+							end
+
+							-- [Forever] Pet fuettern: "Tier fuettern" wirken und den Gegenstand im selben Tastendruck darauf anwenden
+							-- (Macro "/cast ..." + "/use <Tasche> <Platz>"). Ohne vorheriges Wirken isst der Spieler den Gegenstand selbst.
+							if tItemId and tHasBagSlot and Sku.isForever and UnitExists("pet") and _G.C_PetInfo and C_PetInfo.CanPetEatItem then
+								local tOkEat, tCanEat = pcall(C_PetInfo.CanPetEatItem, tItemId)
+								if tOkEat and tCanEat then
+									local tFeedName = _G.C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(6991)
+									if tFeedName and tFeedName ~= "" then
+										local tFeedEntry = SkuOptions:InjectMenuItems(self, {Sku.deEn("Pet füttern", "Feed pet", "Nourrir le familier")}, SkuGenericMenuItem)
+										tFeedEntry.macrotext = "/cast "..tFeedName.."\r\n/use "..aGossipListTable[index].bag.." "..aGossipListTable[index].slot
+										tFeedEntry.secureMacro = true
+										tFeedEntry.OnAction = function()
+											pcall(function() SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Pet wird gefüttert", "feeding pet", "le familier est nourri"), true, true, 0.1, nil, nil, nil, 1) end)
 										end
 									end
 								end

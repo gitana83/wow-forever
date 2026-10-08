@@ -113,6 +113,9 @@ SkuOptions.skuDefaultKeyBindings = {
    -- of combat, no-op with no trade open). See SkuCore:UpdateTradeAcceptBinding.
    ["SKU_KEY_TRADEACCEPT"] = {key = "CTRL-T", object = "SkuCore", func = "UpdateTradeAcceptBinding",},
 
+   -- [Forever] Pet fuettern: Tier fuettern + gewaehltes Futter in einem Tastendruck (SkuCore/petFeed.lua). Standard: keine Taste.
+   ["SKU_KEY_FEEDPET"] = {key = "", object = "SkuCore", func = "UpdateFeedPetBinding",},
+
    -- In-combat menu navigation keys (Path A combat item-use). Unlike most binds these are NOT
    -- applied out of combat -- SkuCore:CombatMenuKeysBindNow reads them from this store and binds
    -- them as secure override clicks only at combat start (cleared at combat end), so out of

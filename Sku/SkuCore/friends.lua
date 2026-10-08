@@ -30,6 +30,34 @@ end)
 -- hook is permanent; install it only once across enable/disable cycles).
 local gShowHookInstalled = false
 
+-- [Forever] Manche C_-Funktionen sind fuer AddOns gesperrt (Blizzard-Doku: HasRestrictions, z. B. SendWho,
+-- AddFriend, AddOrRemoveFriend, TryRequestRecentAlliesData). Ein gesperrter Aufruf tut nichts und meldet nur
+-- ADDON_ACTION_FORBIDDEN. tCalled ruft die Funktion auf und sagt an, falls das Spiel sie blockiert hat,
+-- damit nichts "klappt" nur weil es still blieb.
+local tForbidFrame
+local tForbidHit
+local function tCalled(aFn, aLabel, ...)
+   if not tForbidFrame then
+      tForbidFrame = CreateFrame("Frame")
+      tForbidFrame:SetScript("OnEvent", function(_, _, aAddon, aFunc)
+         if aAddon == "Sku" then tForbidHit = tostring(aFunc or "?") end
+      end)
+      tForbidFrame:RegisterEvent("ADDON_ACTION_FORBIDDEN")
+   end
+   tForbidHit = nil
+   local tOk, tResult = pcall(aFn, ...)
+   C_Timer.After(0.3, function()
+      if tForbidHit then
+         dprint("friends", "blocked", tostring(aLabel), tForbidHit)
+         tForbidHit = nil
+         pcall(function()
+            SkuOptions.Voice:OutputStringBTtts(aLabel.." "..Sku.deEn("wurde vom Spiel blockiert", "was blocked by the game", "a été bloqué par le jeu"), true, true, 0.1, nil, nil, nil, 1)
+         end)
+      end
+   end)
+   return tOk, tResult
+end
+
 ---------------------------------------------------------------------------------------------------------------------------------------
 -- Arm the feature. Called automatically by AceAddon when the module is enabled.
 function Friends:OnEnable()
@@ -38,7 +66,25 @@ function Friends:OnEnable()
    -- they land (only while a user-initiated search is pending — see gWhoPending).
    Friends:RegisterEvent("WHO_LIST_UPDATE", "WHO_LIST_UPDATE")
 
-   if not gShowHookInstalled then
+   Friends:TryInstallShowHook()
+   if Sku.isForever and not gShowHookInstalled then
+      -- Blizzard_SocialUI kann erst spaeter geladen werden: beim Laden nachholen.
+      Friends:RegisterEvent("ADDON_LOADED", function(_, aAddon)
+         if aAddon == "Blizzard_SocialUI" then Friends:TryInstallShowHook() end
+      end)
+   end
+end
+
+-- [Forever] Das Geselligkeitsfenster heisst dort SocialUIFrame (Blizzard_SocialUI, O-Taste), nicht FriendsFrame.
+-- Der alte Hook auf FriendsFrame:Show lief deshalb ins Leere: das Fenster ging auf (nur der Ton), Sku bot kein Menue.
+function Friends:TryInstallShowHook()
+   if gShowHookInstalled then return end
+   if Sku.isForever then
+      local tFrame = _G.SocialUIFrame
+      if not tFrame then return end
+      tFrame:HookScript("OnShow", function() Friends:ONSHOW() end)
+      gShowHookInstalled = true
+   elseif _G.FriendsFrame then
       hooksecurefunc(FriendsFrame, "Show", Friends.ONSHOW)
       gShowHookInstalled = true
    end
@@ -185,7 +231,7 @@ local function tAddFriendSubmenu(aParent, aIndex, aOnline, aIsBnet)
          BNRemoveFriend(accountInfo.bnetAccountID)
       else
          local info = C_FriendList.GetFriendInfoByIndex(aIndex)
-         C_FriendList.AddOrRemoveFriend(info.name, "")
+         tCalled(C_FriendList.AddOrRemoveFriend, Sku.deEn("Freund entfernen", "remove friend", "retirer l'ami"), info.name, "")
       end
       C_Timer.After(0.65, function()
          local tAnchor = SkuOptions.currentMenuPosition:FindAncestorById("friendsList")
@@ -228,9 +274,9 @@ local function tAddWowFriend(aParent, aIndex, aOnline)
       if info.afk == true or info.dnd == true then
          tText = tText.."\r\n"
       end
-      tText = tText..info.className.."\r\n"
-      tText = tText.."level "..info.level.."\r\n"
-      tText = tText..info.area.."\r\n"
+      tText = tText..(info.className or "").."\r\n"
+      tText = tText.."level "..(info.level or "?").."\r\n"
+      tText = tText..(info.area or "").."\r\n"
       if info.notes then
          tText = tText..L["note"]..": "..info.notes.."\r\n"
       end
@@ -327,10 +373,12 @@ local function tAddBnetFriend(aParent, aIndex, aOnline)
       BNET_CLIENT_DI	ANBS	Diablo Immortal
       BNET_CLIENT_ARCLIGHT	GRY	Warcraft Arclight Rumble
    ]]
-   if accountInfo and accountInfo.gameAccountInfo and accountInfo.gameAccountInfo.isOnline == true and aOnline == true then
-      local tNewMenuEntry = SkuOptions:InjectMenuItems(aParent, {"Bnet: "..accountInfo.battleTag.." - online"}, SkuGenericMenuItem)
+   local tBnetName = accountInfo and (accountInfo.battleTag or accountInfo.accountName or (accountInfo.gameAccountInfo and accountInfo.gameAccountInfo.characterName)) or "?"
+   local tBnetOnline = accountInfo and accountInfo.gameAccountInfo and accountInfo.gameAccountInfo.isOnline == true
+   if accountInfo and tBnetOnline and aOnline == true then
+      local tNewMenuEntry = SkuOptions:InjectMenuItems(aParent, {"Bnet: "..tBnetName.." - online"}, SkuGenericMenuItem)
       tNewMenuEntry.dynamic = true
-      local tText = accountInfo.battleTag.."\r\n"
+      local tText = tBnetName.."\r\n"
       if accountInfo.isDND == true then
          tText = tText.."DND "
       end
@@ -369,10 +417,10 @@ local function tAddBnetFriend(aParent, aIndex, aOnline)
          tAddFriendSubmenu(self, aIndex, aOnline, true)
       end
 
-   elseif accountInfo and accountInfo.gameAccountInfo and accountInfo.gameAccountInfo.isOnline ~= true and aOnline ~= true then
-      local tNewMenuEntry = SkuOptions:InjectMenuItems(aParent, {"Bnet: "..accountInfo.battleTag.." - offline"}, SkuGenericMenuItem)
+   elseif accountInfo and not tBnetOnline and aOnline ~= true then
+      local tNewMenuEntry = SkuOptions:InjectMenuItems(aParent, {"Bnet: "..tBnetName.." - offline"}, SkuGenericMenuItem)
       tNewMenuEntry.dynamic = true
-      local tText = accountInfo.battleTag.."\r\n"
+      local tText = tBnetName.."\r\n"
       if accountInfo.note and accountInfo.note ~= "" then
          tText = tText..L["note"]..": "..accountInfo.note
       end
@@ -488,7 +536,7 @@ local function tAddWhoResult(aParent, aInfo)
       local tAdd = SkuOptions:InjectMenuItems(self, {L["add friend"]}, SkuGenericMenuItem)
       tAdd.isSelect = true
       tAdd.OnAction = function(self)
-         C_FriendList.AddFriend(tName)
+         tCalled(C_FriendList.AddFriend, Sku.deEn("Freund hinzufügen", "add friend", "ajouter un ami"), tName)
          pcall(function() SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Freund hinzugefügt", "friend added", "ami ajouté"), true, true, 0.1, nil, nil, nil, 1) end)
       end
 
@@ -632,7 +680,7 @@ function Friends:FriendsMenuBuilder()
       tNewMenuEntryContacts.sorting = true
       tNewMenuEntryContacts.id = "friendsList"  -- stable nav anchor (W6-B #14)
       tNewMenuEntryContacts.OnEnter = function(self, aValue, aName, aEnterFlag)
-         C_FriendList.ShowFriends()
+         if C_FriendList.ShowFriends then pcall(C_FriendList.ShowFriends) end
       end
       tNewMenuEntryContacts.BuildChildren = function(self)
          local tNewMenuEntry = SkuOptions:InjectMenuItems(self, {L["add friend"]}, SkuGenericMenuItem)
@@ -640,7 +688,7 @@ function Friends:FriendsMenuBuilder()
          tNewMenuEntry.OnAction = function(self)
             SkuOptions:EditBoxShow("", function(self)
                if self:GetText() and self:GetText() ~= "" then
-                  C_FriendList.AddFriend(self:GetText())
+                  tCalled(C_FriendList.AddFriend, Sku.deEn("Freund hinzufügen", "add friend", "ajouter un ami"), self:GetText())
                end
                PlaySound(89)
                C_Timer.After(0.65, function()
@@ -651,22 +699,261 @@ function Friends:FriendsMenuBuilder()
             SkuOptions.Voice:OutputStringBTtts(L["name eingeben und Enter drücken"], true, true, 0.2, nil, nil, nil, 2)
          end
          
-         local tNumFriends = C_FriendList.GetNumFriends()
+         local tNumFriends = C_FriendList.GetNumFriends() or 0
          for x = 1, tNumFriends do
-            tAddWowFriend(self, x, true)
+            pcall(tAddWowFriend, self, x, true)
          end
          local numBNetTotal, numBNetOnline, numBNetFavorite, numBNetFavoriteOnline = BNGetNumFriends()
+         numBNetTotal = numBNetTotal or 0
          for x = 1, numBNetTotal do
-            tAddBnetFriend(self, x, true)
+            pcall(tAddBnetFriend, self, x, true)
          end
          for x = 1, tNumFriends do
-            tAddWowFriend(self, x, false)
+            pcall(tAddWowFriend, self, x, false)
          end
          for x = 1, numBNetTotal do
-            tAddBnetFriend(self, x, false)
+            pcall(tAddBnetFriend, self, x, false)
          end      
       end
       
+      -- Battle.net-Freundschaftsanfragen (in Blizzards Fenster ein eigener Reiter): annehmen oder ablehnen.
+      if _G.BNGetNumFriendInvites and C_BattleNet and C_BattleNet.GetFriendInviteInfo then
+         local tNumInvites = BNGetNumFriendInvites() or 0
+         local tReqLabel = Sku.deEn("Freundschaftsanfragen", "Friend requests", "Demandes d'ami").." ("..tNumInvites..")"
+         local tNewMenuEntryRequests = SkuOptions:InjectMenuItems(self, {tReqLabel}, SkuGenericMenuItem)
+         tNewMenuEntryRequests.dynamic = true
+         tNewMenuEntryRequests.id = "friendRequests"
+         tNewMenuEntryRequests.BuildChildren = function(self)
+            local tNum = BNGetNumFriendInvites() or 0
+            if tNum == 0 then
+               SkuOptions:InjectMenuItems(self, {Sku.deEn("keine Anfragen", "no requests", "aucune demande")}, SkuGenericMenuItem)
+               return
+            end
+            local function tAfterAnswer(aText)
+               pcall(function() SkuOptions.Voice:OutputStringBTtts(aText, true, true, 0.1, nil, nil, nil, 1) end)
+               C_Timer.After(0.6, function()
+                  local tAnchor = SkuOptions.currentMenuPosition and SkuOptions.currentMenuPosition:FindAncestorById("friendRequests")
+                  if tAnchor then tAnchor:OnSelect() end
+               end)
+            end
+            for x = 1, tNum do
+               local tInfo = C_BattleNet.GetFriendInviteInfo(x)
+               if tInfo and tInfo.inviteID then
+                  local tInviteID = tInfo.inviteID
+                  local tWho = tostring(tInfo.accountName or "?")
+                  local tEntry = SkuOptions:InjectMenuItems(self, {tWho}, SkuGenericMenuItem)
+                  tEntry.dynamic = true
+                  tEntry.BuildChildren = function(self2)
+                     local tAccept = SkuOptions:InjectMenuItems(self2, {Sku.deEn("annehmen", "accept", "accepter")}, SkuGenericMenuItem)
+                     tAccept.isSelect = true
+                     tAccept.OnAction = function()
+                        local tOk = pcall(_G.BNAcceptFriendInvite, tInviteID)
+                        tAfterAnswer(tOk and (tWho.." "..Sku.deEn("angenommen", "accepted", "accepté")) or Sku.deEn("Anfrage konnte nicht angenommen werden", "could not accept request", "impossible d'accepter"))
+                     end
+                     local tDecline = SkuOptions:InjectMenuItems(self2, {Sku.deEn("ablehnen", "decline", "refuser")}, SkuGenericMenuItem)
+                     tDecline.isSelect = true
+                     tDecline.OnAction = function()
+                        local tOk = pcall(_G.BNDeclineFriendInvite, tInviteID)
+                        tAfterAnswer(tOk and (tWho.." "..Sku.deEn("abgelehnt", "declined", "refusé")) or Sku.deEn("Anfrage konnte nicht abgelehnt werden", "could not decline request", "impossible de refuser"))
+                     end
+                  end
+               end
+            end
+         end
+      end
+
+      -- [Forever] Zuletzt getroffen (Blizzards Reiter "Kuerzlich getroffen", C_RecentAllies).
+      if _G.C_RecentAllies and C_RecentAllies.IsSystemEnabled and C_RecentAllies.GetRecentAllies then
+         local tOkEn, tEnabled = pcall(C_RecentAllies.IsSystemEnabled)
+         if tOkEn and tEnabled then
+            local tRecent = SkuOptions:InjectMenuItems(self, {Sku.deEn("Zuletzt getroffen", "Recent allies", "Alliés récents")}, SkuGenericMenuItem)
+            tRecent.dynamic = true
+            tRecent.sorting = true
+            tRecent.id = "recentAllies"
+            tRecent.BuildChildren = function(self)
+               -- TryRequestRecentAlliesData ist fuer AddOns gesperrt (HasRestrictions). Blizzards eigener Reiter ruft es
+               -- beim Anzeigen auf: ein sicherer Klick auf den Reiter laedt die Daten, ohne dass Sku selbst anfragt.
+               local tReady = true
+               if C_RecentAllies.IsRecentAllyDataReady then
+                  local tOkR, tR = pcall(C_RecentAllies.IsRecentAllyDataReady)
+                  tReady = tOkR and tR and true or false
+               end
+               if not tReady then
+                  local tTab
+                  local tSocial = _G.SocialUIFrame
+                  if tSocial and tSocial.GetTabByType and _G.SocialUITabType then
+                     local tOkT, tT = pcall(tSocial.GetTabByType, tSocial, SocialUITabType.RecentAllies)
+                     if tOkT then tTab = tT end
+                  end
+                  local tLoad = SkuOptions:InjectMenuItems(self, {Sku.deEn("Daten laden", "load data", "charger les données")}, SkuGenericMenuItem)
+                  if tTab then
+                     tLoad.secureClickFrame = tTab
+                     tLoad.OnAction = function()
+                        C_Timer.After(1.0, function()
+                           local tAnchor = SkuOptions.currentMenuPosition and SkuOptions.currentMenuPosition:FindAncestorById("recentAllies")
+                           if tAnchor then tAnchor:OnSelect(); SkuOptions:VocalizeCurrentMenuName() end
+                        end)
+                     end
+                  else
+                     tLoad.textFull = Sku.deEn("Reiter nicht verfügbar", "tab not available", "onglet indisponible")
+                  end
+               end
+               local tOk, tList = pcall(C_RecentAllies.GetRecentAllies)
+               if not tOk or type(tList) ~= "table" or #tList == 0 then
+                  SkuOptions:InjectMenuItems(self, {Sku.deEn("niemand gespeichert", "nobody saved", "personne d'enregistré")}, SkuGenericMenuItem)
+                  return
+               end
+               -- Online zuerst
+               table.sort(tList, function(a, b)
+                  local ao = a.stateData and a.stateData.isOnline and 1 or 0
+                  local bo = b.stateData and b.stateData.isOnline and 1 or 0
+                  if ao ~= bo then return ao > bo end
+                  return tostring(a.characterData and a.characterData.fullName or "") < tostring(b.characterData and b.characterData.fullName or "")
+               end)
+               for _, tAlly in ipairs(tList) do
+                  pcall(function()
+                     local tChar, tState, tInter = tAlly.characterData, tAlly.stateData, tAlly.interactionData
+                     if not tChar then return end
+                     local tName = tostring(tChar.fullName or tChar.name or "?")
+                     local tOnline = tState and tState.isOnline
+                     local tClass = ""
+                     if tChar.classID and GetClassInfo then
+                        local tOkC, tCN = pcall(GetClassInfo, tChar.classID)
+                        if tOkC and tCN then tClass = " "..tCN end
+                     end
+                     local tLabel = tName.." - "..Sku.deEn("Stufe ", "level ", "niveau ")..(tChar.level or "?")..tClass
+                        .." - "..(tOnline and "online" or "offline")
+                     local tEntry = SkuOptions:InjectMenuItems(self, {tLabel}, SkuGenericMenuItem)
+                     tEntry.dynamic = true
+                     local tText = tName.."\r\n"
+                     if tState and tState.isDND then tText = tText.."DND\r\n" elseif tState and tState.isAFK then tText = tText.."AFK\r\n" end
+                     if tOnline and tState.currentLocation and tState.currentLocation ~= "" then tText = tText..tState.currentLocation.."\r\n" end
+                     if tInter and tInter.interactions then
+                        for i = 1, math.min(#tInter.interactions, 3) do
+                           local tI = tInter.interactions[i]
+                           if tI and tI.description and tI.description ~= "" then tText = tText..tostring(tI.description).."\r\n" end
+                        end
+                     end
+                     if tInter and tInter.note and tInter.note ~= "" then tText = tText..L["note"]..": "..tInter.note.."\r\n" end
+                     tEntry.textFull = tText
+                     tEntry.BuildChildren = function(self2)
+                        local tWhisper = SkuOptions:InjectMenuItems(self2, {L["whisper"]}, SkuGenericMenuItem)
+                        tWhisper.isSelect = true
+                        tWhisper.OnAction = function() SkuChat:SetEditboxToCustom("WHISPER", tName, "") end
+                        local tInv = SkuOptions:InjectMenuItems(self2, {L["invite"]}, SkuGenericMenuItem)
+                        tInv.isSelect = true
+                        tInv.OnAction = function() tInviteByName(tName) end
+                        local tOkN, tCanNote = pcall(C_RecentAllies.CanSetRecentAllyNote, tChar.guid)
+                        if tOkN and tCanNote and C_RecentAllies.SetRecentAllyNote then
+                           local tNote = SkuOptions:InjectMenuItems(self2, {L["edit note"]}, SkuGenericMenuItem)
+                           tNote.isSelect = true
+                           tNote.OnAction = function()
+                              SkuOptions:EditBoxShow("", function(self3)
+                                 pcall(C_RecentAllies.SetRecentAllyNote, tChar.guid, self3:GetText() or "")
+                                 C_Timer.After(0.5, function()
+                                    local tAnchor = SkuOptions.currentMenuPosition and SkuOptions.currentMenuPosition:FindAncestorById("recentAllies")
+                                    if tAnchor then tAnchor:OnSelect(); SkuOptions:VocalizeCurrentMenuName() end
+                                 end)
+                              end, nil)
+                              C_Timer.After(0.1, function()
+                                 SkuOptions.Voice:OutputStringBTtts(L["Notiz eingeben und Enter drücken"], true, true, 0.1, nil, nil, nil, 1)
+                              end)
+                           end
+                        end
+                     end
+                  end)
+               end
+            end
+         end
+      end
+
+      -- [Forever] Schnellbeitritt: Gruppen von Freunden/Gildenmitgliedern, die gerade in einer Warteschlange sind.
+      if _G.C_SocialQueue and C_SocialQueue.IsSystemEnabled and C_SocialQueue.GetAllGroups then
+         local tOkEn, tEnabled = pcall(C_SocialQueue.IsSystemEnabled)
+         if tOkEn and tEnabled then
+            local tQuick = SkuOptions:InjectMenuItems(self, {Sku.deEn("Schnellbeitritt", "Quick join", "Rejoindre vite")}, SkuGenericMenuItem)
+            tQuick.dynamic = true
+            tQuick.id = "quickJoin"
+            tQuick.BuildChildren = function(self)
+               local tOk, tGroups = pcall(C_SocialQueue.GetAllGroups)
+               if not tOk or type(tGroups) ~= "table" or #tGroups == 0 then
+                  SkuOptions:InjectMenuItems(self, {Sku.deEn("keine Gruppen", "no groups", "aucun groupe")}, SkuGenericMenuItem)
+                  return
+               end
+               local function tClean(a)
+                  local s = tostring(a or "")
+                  s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h(.-)|h", "%1"):gsub("\n", ", ")
+                  return s
+               end
+               for _, tGuid in ipairs(tGroups) do
+                  pcall(function()
+                     local tHeader = ""
+                     if _G.SocialQueueUtil_GetHeaderName then
+                        local tOkH, tH = pcall(SocialQueueUtil_GetHeaderName, tGuid)
+                        if tOkH then tHeader = tClean(tH) end
+                     end
+                     if tHeader == "" then tHeader = Sku.deEn("Gruppe", "group", "groupe") end
+                     local tQueues = C_SocialQueue.GetGroupQueues(tGuid) or {}
+                     local tQueueNames = {}
+                     for _, q in ipairs(tQueues) do
+                        if _G.SocialQueueUtil_GetQueueName then
+                           local tOkQ, tN = pcall(SocialQueueUtil_GetQueueName, q.queueData)
+                           if tOkQ and tN and tN ~= "" then tQueueNames[#tQueueNames + 1] = tClean(tN) end
+                        end
+                     end
+                     local tCanJoin, tNumQueues, tNeedTank, tNeedHealer, tNeedDamage = C_SocialQueue.GetGroupInfo(tGuid)
+                     local tLabel = tHeader..": "..((#tQueueNames > 0) and table.concat(tQueueNames, ", ") or Sku.deEn("Warteschlange", "queue", "file"))
+                     local tEntry = SkuOptions:InjectMenuItems(self, {tLabel}, SkuGenericMenuItem)
+                     tEntry.dynamic = true
+                     local tText = tLabel.."\r\n"
+                     local tMembers = C_SocialQueue.GetGroupMembers(tGuid) or {}
+                     for _, m in ipairs(tMembers) do
+                        if _G.SocialQueueUtil_GetRelationshipInfo then
+                           local tOkM, tMN = pcall(SocialQueueUtil_GetRelationshipInfo, m.guid, nil, m.clubId)
+                           if tOkM and tMN and tMN ~= "" then tText = tText..tClean(tMN).."\r\n" end
+                        end
+                     end
+                     local tNeeds = {}
+                     if tNeedTank then tNeeds[#tNeeds + 1] = Sku.deEn("Tank", "tank", "tank") end
+                     if tNeedHealer then tNeeds[#tNeeds + 1] = Sku.deEn("Heiler", "healer", "soigneur") end
+                     if tNeedDamage then tNeeds[#tNeeds + 1] = Sku.deEn("Schaden", "damage", "dégâts") end
+                     if #tNeeds > 0 then tText = tText..Sku.deEn("Gesucht", "needed", "recherché")..": "..table.concat(tNeeds, ", ").."\r\n" end
+                     if not tCanJoin then tText = tText..Sku.deEn("Beitritt gerade nicht möglich", "cannot join right now", "impossible de rejoindre").."\r\n" end
+                     tEntry.textFull = tText
+                     tEntry.BuildChildren = function(self2)
+                        if not tCanJoin then
+                           SkuOptions:InjectMenuItems(self2, {Sku.deEn("Beitritt gerade nicht möglich", "cannot join right now", "impossible de rejoindre")}, SkuGenericMenuItem)
+                           return
+                        end
+                        if tQueues[1] and tQueues[1].queueData and tQueues[1].queueData.queueType == "lfglist" then
+                           SkuOptions:InjectMenuItems(self2, {Sku.deEn("Gruppensuche-Eintrag: bitte über die Gruppensuche anmelden", "Group finder listing: please apply through the group finder", "Annonce de recherche de groupe: postulez via la recherche de groupe")}, SkuGenericMenuItem)
+                           return
+                        end
+                        local function tJoin(aTank, aHealer, aDamage, aLabel)
+                           local tE = SkuOptions:InjectMenuItems(self2, {aLabel}, SkuGenericMenuItem)
+                           tE.isSelect = true
+                           tE.OnAction = function()
+                              local tOkJ, tRes = tCalled(C_SocialQueue.RequestToJoin, Sku.deEn("Beitrittsanfrage", "join request", "demande"), tGuid, aTank, aHealer, aDamage)
+                              dprint("quickJoin", "request", tostring(tGuid), tostring(aTank), tostring(aHealer), tostring(aDamage), tostring(tOkJ), tostring(tRes))
+                              local tMsg
+                              if tOkJ and tRes then
+                                 tMsg = Sku.deEn("Beitrittsanfrage gesendet", "join request sent", "demande envoyée")
+                              else
+                                 tMsg = Sku.deEn("Beitrittsanfrage fehlgeschlagen", "join request failed", "demande échouée")
+                              end
+                              pcall(function() SkuOptions.Voice:OutputStringBTtts(tMsg, true, true, 0.1, nil, nil, nil, 1) end)
+                           end
+                        end
+                        tJoin(true, false, false, Sku.deEn("als Tank anmelden", "apply as tank", "postuler comme tank"))
+                        tJoin(false, true, false, Sku.deEn("als Heiler anmelden", "apply as healer", "postuler comme soigneur"))
+                        tJoin(false, false, true, Sku.deEn("als Schaden anmelden", "apply as damage dealer", "postuler comme dégâts"))
+                     end
+                  end)
+               end
+            end
+         end
+      end
+
       local tNewMenuEntryIgnore = SkuOptions:InjectMenuItems(self, {L["Ignore List"]}, SkuGenericMenuItem)
       tNewMenuEntryIgnore.dynamic = true
       tNewMenuEntryIgnore.sorting = true
@@ -725,7 +1012,7 @@ function Friends:FriendsMenuBuilder()
             local q = self:GetText()
             if q and q ~= "" then
                Friends.gWhoPending = true
-               C_FriendList.SendWho(q, Enum and Enum.SocialWhoOrigin and Enum.SocialWhoOrigin.Social)
+               tCalled(C_FriendList.SendWho, Sku.deEn("Spielersuche", "player search", "recherche de joueur"), q, Enum and Enum.SocialWhoOrigin and Enum.SocialWhoOrigin.Social)
                -- Fallback re-pin if WHO_LIST_UPDATE never arrives (empty result).
                C_Timer.After(2.0, function()
                   if Friends.gWhoPending then
@@ -796,9 +1083,9 @@ function Friends:FriendsMenuBuilder()
          tInfoText = tInfoText..Sku.deEn("Rang", "rank", "rang")..": "..guildRankName.."\r\n"
       end
       tInfoText = tInfoText..(online or 0).." "..Sku.deEn("online", "online", "en ligne").." / "..(total or 0).." "..Sku.deEn("gesamt", "total", "total").."\r\n"
-      local motd = GetGuildRosterMOTD and GetGuildRosterMOTD()
+      local motd = (not Sku.isForever) and GetGuildRosterMOTD and GetGuildRosterMOTD()
       if motd and motd ~= "" then tInfoText = tInfoText.."MOTD: "..motd.."\r\n" end
-      local itext = GetGuildInfoText and GetGuildInfoText()
+      local itext = (not Sku.isForever) and GetGuildInfoText and GetGuildInfoText()
       if itext and itext ~= "" then tInfoText = tInfoText..Sku.deEn("Info", "info", "infos")..": "..itext.."\r\n" end
       tInfo.textFull = tInfoText
 

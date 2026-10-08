@@ -576,19 +576,43 @@ local function tBuildTargetMenu(aParent)
 						local newName = self:GetText()
 						if newName and newName ~= "" then
 							local tSafeName = newName:gsub('["\\\r\n]', '')
-							local ok = pcall(PetRename, tSafeName)
-							if ok then
-								SkuOptions.Voice:OutputStringBTtts(L["MOB_PetRenamed"]..tSafeName, true, true, 0.2)
-								SkuMob.pendingPetRename = nil
-							else
-								SkuMob.pendingPetRename = tSafeName
-								SkuOptions.Voice:OutputStringBTtts(L["MOB_PetRenameSaved"], true, true, 0.2)
-							end
+							-- [Forever] Der globale PetRename fehlt dort; die Funktion heisst C_PetInfo.PetRename. Ergebnis wird
+							-- geprueft (Name des Tiers), nicht nur der pcall: sonst "klappt" es nur akustisch bzw. haengt still.
+							local tFn = _G.PetRename or (_G.C_PetInfo and _G.C_PetInfo.PetRename)
+							local tOk, tErr = false, "PetRename fehlt"
+							if tFn then tOk, tErr = pcall(tFn, tSafeName) end
+							dprint("petRename", tSafeName, "fn", tostring(tFn ~= nil), "ok", tostring(tOk), tostring(tErr))
+							C_Timer.After(1.0, function()
+								if UnitName("pet") == tSafeName then
+									SkuMob.pendingPetRename = nil
+									tSay(L["MOB_PetRenamed"]..tSafeName)
+								elseif _G.StaticPopup_Visible and _G.StaticPopup_Visible("PETRENAMECONFIRM") then
+									SkuMob.pendingPetRename = nil
+									tSay(tSafeName..": "..Sku.deEn("Bestätigung offen, bitte mit Ja bestätigen", "confirmation open, please answer Yes", "confirmation ouverte, répondez Oui"))
+								else
+									-- Direkter Aufruf wirkungslos: Blizzards eigene Bestaetigung zeigen, "Ja" laeuft dann in Blizzards Code.
+									local tShown = pcall(StaticPopup_Show, "PETRENAMECONFIRM", tSafeName, nil, { newName = tSafeName })
+									dprint("petRename", "fallback popup", tostring(tShown))
+									if tShown then
+										SkuMob.pendingPetRename = nil
+										tSay(tSafeName..": "..Sku.deEn("Bestätigung offen, bitte mit Ja bestätigen", "confirmation open, please answer Yes", "confirmation ouverte, répondez Oui"))
+									else
+										SkuMob.pendingPetRename = tSafeName
+										tSay(L["MOB_PetRenameSaved"])
+									end
+								end
+							end)
 						end
 					end)
 					SkuOptions.Voice:OutputStringBTtts(L["MOB_PetRenamePrompt"], false, true, 0.2)
 				end)
 			end, L["MOB_PetRenameTip"])
+
+			-- [Forever] Pet fuettern (Futter waehlen + Taste), SkuCore/petFeed.lua
+			if Sku.isForever and SkuCore and SkuCore.PetFeed and SkuCore.PetFeed.MenuBuilder then
+				local tOkF, tErrF = pcall(SkuCore.PetFeed.MenuBuilder, SkuCore.PetFeed, aParent)
+				if not tOkF then dprint("petFeed", "menu error", tostring(tErrF)) end
+			end
 
 			if SkuMob.pendingPetRename then
 				local tSafeName = SkuMob.pendingPetRename:gsub('["\\\r\n]', '')
@@ -596,7 +620,7 @@ local function tBuildTargetMenu(aParent)
 				local tEntry = SkuOptions:InjectMenuItems(aParent, {tConfirmLabel}, SkuGenericMenuItem)
 				tEntry.sorting = true
 				tEntry.textFull = L["MOB_PetRenameTip"]
-				tEntry.macrotext = '/run PetRename("' .. tSafeName .. '")'
+				tEntry.macrotext = '/run (PetRename or C_PetInfo.PetRename)("' .. tSafeName .. '")'
 				tEntry.secureMacro = true
 				tEntry.OnAction = function()
 					tSay(L["MOB_PetRenamed"] .. tSafeName)

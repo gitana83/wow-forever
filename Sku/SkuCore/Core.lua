@@ -480,7 +480,7 @@ SkuCore.localWindowContributors = {
 	        if SkuCore.AuctionHouse and SkuCore.AuctionHouse.AuctionHouseMenuBuilder then SkuCore.AuctionHouse.AuctionHouseMenuBuilder(self) end
 	     end
 	  end },
-	{ frame = "FriendsFrame", label = function() return Sku.L["Social"] end,
+	{ frame = Sku.isForever and "SocialUIFrame" or "FriendsFrame", label = function() return Sku.L["Social"] end,
 	  build = function(self) if SkuCore.Friends and SkuCore.Friends.FriendsMenuBuilder then SkuCore.Friends.FriendsMenuBuilder(self) end end },
 	{ frame = "QuestLogFrame", label = function() return Sku.L["SkuQuestMenuEntry"] end,
 	  build = function(self) if SkuQuest and SkuQuest.MenuBuilder then SkuQuest:MenuBuilder(self) end end },
@@ -1731,6 +1731,26 @@ SkuCore.PetHappinessString = {[1] = L["Unhappy"], [2] = L["Content "], [3] = L["
 -- [Forever] GetPetHappiness ist kein Global mehr, sondern C_PetInfo.GetPetHappiness (Skala 1 unzufrieden,
 -- 2 neutral, 3 gluecklich). Der alte Aufruf warf 974 Fehler in Folge, sobald ein Pet da war. Liefert nur
 -- eine Zahl 1..3 oder nil, nie einen Fehler.
+-- Lehrerfenster-Filter. Klassenlehrer: nur Lernbares zeigen. Wildtierausbildung (Forever): alles zeigen, damit bereits
+-- Gelerntes als "gelernt" in der Liste steht und die Liste nicht leer wirkt, wenn gerade nichts Neues lernbar ist.
+function SkuCore:ApplyTrainerFilters()
+	local tAll = false
+	if Sku.isForever and _G.C_Trainer and C_Trainer.GetTrainerType and _G.Enum and Enum.TrainerType then
+		local tOk, tType = pcall(C_Trainer.GetTrainerType)
+		tAll = (tOk and tType == Enum.TrainerType.Pet) and true or false
+	end
+	pcall(SetTrainerServiceTypeFilter, "available", true)
+	pcall(SetTrainerServiceTypeFilter, "unavailable", tAll)
+	pcall(SetTrainerServiceTypeFilter, "used", tAll)
+	if tAll then
+		C_Timer.After(0.3, function()
+			if _G["ClassTrainerFrame"] and _G["ClassTrainerFrame"]:IsVisible() == true then
+				pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+			end
+		end)
+	end
+end
+
 function SkuCore:GetPetHappinessSafe()
 	local tFunc = _G.GetPetHappiness or (_G.C_PetInfo and _G.C_PetInfo.GetPetHappiness)
 	if not tFunc then return nil end
@@ -1851,18 +1871,14 @@ function SkuCore:OnEnable()
 	f:SetScript("OnUpdate", function(self, time)
 		if ClassTrainerFrame and tClassTrainerFrameHooked == false then
 			tClassTrainerFrameHooked = true
-			SetTrainerServiceTypeFilter("available", true)
-			SetTrainerServiceTypeFilter("unavailable", false)
-			SetTrainerServiceTypeFilter("used", false)
+			SkuCore:ApplyTrainerFilters()
 			if _G["ClassTrainerSkill2"] then
 				C_Timer.After(0.1, function()
 					_G["ClassTrainerSkill2"]:Click("LeftMouse")
 				end)
 			end
 			ClassTrainerFrame:HookScript("OnShow", function()
-				SetTrainerServiceTypeFilter("available", true)
-				SetTrainerServiceTypeFilter("unavailable", false)
-				SetTrainerServiceTypeFilter("used", false)
+				SkuCore:ApplyTrainerFilters()
 				if _G["ClassTrainerSkill2"] then
 					C_Timer.After(0.1, function()
 						_G["ClassTrainerSkill2"]:Click("LeftMouse")

@@ -4212,23 +4212,242 @@ local tTradeSkillTypeColor = {
 	[L["nodifficulty"]] = { r = 0.96, g = 0.96, b = 0.96},
 	[L["selected"]] = { r = 1, g = 1, b = 1},
 }
+-- [Forever] Lehrer und Wildtierausbildung teilen sich dasselbe Fenster (ClassTrainerFrame, Blizzard_TrainerUI).
+-- Bei der Wildtierausbildung (C_Trainer.GetTrainerType() == Enum.TrainerType.Pet) kosten die Faehigkeiten
+-- Ausbildungspunkte des Tiers statt Geld; die freien Punkte liefert C_PetInfo.GetPetTrainingPoints.
+local function tTrainerSay(aText)
+	pcall(function() SkuOptions.Voice:OutputStringBTtts(aText, false, true, 0.2) end)
+end
+
+local function tTrainerIsPet()
+	if _G.C_Trainer and _G.C_Trainer.GetTrainerType and _G.Enum and _G.Enum.TrainerType then
+		local tOk, tType = pcall(_G.C_Trainer.GetTrainerType)
+		return (tOk and tType == _G.Enum.TrainerType.Pet) and true or false
+	end
+	return false
+end
+
+-- Freie Ausbildungspunkte des Tiers (nil, wenn die Abfrage nicht moeglich ist).
+local function tTrainerPetPoints()
+	if not (_G.C_PetInfo and _G.C_PetInfo.GetPetTrainingPoints) then return nil end
+	local tOk, tTotal, tUsed = pcall(_G.C_PetInfo.GetPetTrainingPoints)
+	if tOk and type(tTotal) == "number" and type(tUsed) == "number" then
+		return math.max(tTotal - tUsed, 0), tTotal, tUsed
+	end
+	return nil
+end
+
+-- Bereits gelernte Pet-Fertigkeiten ausblenden. Das Spiel meldet sie im Lehrerfenster trotzdem als "lernbar" (Knurren), der Server
+-- lehnt das Lernen dann mit "Euer Begleiter beherrscht bereits ..." ab. Zwei Quellen: das Pet-Zauberbuch (gleicher Name, Rang
+-- gleich oder hoeher) und eine gemerkte Ablehnung (pro Pet-GUID, Name und Rang), die beim ersten Versuch gelernt wird.
+local function tTrainerRankNumber(aRankText)
+	return tonumber(tostring(aRankText or ""):match("(%d+)")) or 1
+end
+
+local function tTrainerKnownStore()
+	local tStore = SkuSettings:Sub("SkuCore", nil, "char")
+	tStore.petKnownSkills = tStore.petKnownSkills or {}
+	return tStore.petKnownSkills
+end
+
+local function tTrainerKnownKey(aName, aRankText)
+	return tostring(UnitGUID("pet") or "?").."|"..tostring(aName).."|"..tTrainerRankNumber(aRankText)
+end
+
+local function tTrainerPetKnownRank(aName)
+	if not (_G.C_SpellBook and C_SpellBook.HasPetSpells and C_SpellBook.GetSpellBookItemName and _G.Enum and Enum.SpellBookSpellBank) then
+		return nil
+	end
+	local tOk, tNum = pcall(C_SpellBook.HasPetSpells)
+	tNum = (tOk and tonumber(tNum)) or 0
+	local tBest
+	for i = 1, tNum do
+		local tOkN, tSpell, tSub = pcall(C_SpellBook.GetSpellBookItemName, i, Enum.SpellBookSpellBank.Pet)
+		if tOkN and tSpell == aName then
+			local tRank = tonumber(tostring(tSub or ""):match("(%d+)")) or 0
+			if not tBest or tRank > tBest then tBest = tRank end
+		end
+	end
+	return tBest
+end
+
+local function tTrainerPetSkillKnown(aName, aRankText)
+	if tTrainerKnownStore()[tTrainerKnownKey(aName, aRankText)] then return true end
+	local tKnownRank = tTrainerPetKnownRank(aName)
+	return (tKnownRank and tKnownRank > 0 and tTrainerRankNumber(aRankText) <= tKnownRank) and true or false
+end
+
+local function tTrainerIsAlreadyKnownMessage(aMessage)
+	if type(aMessage) ~= "string" then return false end
+	local tPrefix = type(_G.ERR_PET_SPELL_ALREADY_KNOWN) == "string" and _G.ERR_PET_SPELL_ALREADY_KNOWN:match("^(.-)%%s") or nil
+	if tPrefix and tPrefix ~= "" then return aMessage:sub(1, #tPrefix) == tPrefix end
+	local tLower = aMessage:lower()
+	return (tLower:find("bereits", 1, true) or tLower:find("already", 1, true)) and true or false
+end
+
+local tTrainerErrorFrame
+local tTrainerLastError
+
+-- BuyTrainerService ist auf Forever geschuetzt (Log: ADDON_ACTION_FORBIDDEN bei jedem Enter auf eine Fertigkeit).
+-- Deshalb kauft Sku nie selbst: Fertigkeit waehlen = sicherer Klick auf die Zeile in Blizzards Fenster,
+-- Lernen = sicherer Klick auf Blizzards ClassTrainerTrainButton (wie beim Bankfach-Kauf).
+
+-- Die Blizzard-Zeile (Frame-Objekt) zu einem Dienstindex; nil, wenn sie gerade nicht gebaut ist.
+local function tTrainerRowFor(aSkillIndex)
+	local tBox = _G["ClassTrainerFrame"] and _G["ClassTrainerFrame"].ScrollBox
+	if not (tBox and tBox.FindFrameByPredicate) then return nil end
+	local tOk, tRow = pcall(tBox.FindFrameByPredicate, tBox, function(_, aElementData)
+		local tData = aElementData and (aElementData.data or aElementData)
+		return tData and tData.skillIndex == aSkillIndex
+	end)
+	return tOk and tRow or nil
+end
+
+-- Dienstindex der in Blizzards Fenster gewaehlten Fertigkeit (nil, wenn keine gewaehlt ist).
+local function tTrainerSelectedIndex()
+	local tFrame = _G["ClassTrainerFrame"]
+	if not (tFrame and tFrame.selectedService and tFrame.displayIndexToSkillIndex) then return nil end
+	return tFrame.displayIndexToSkillIndex[tFrame.selectedService]
+end
+
+-- Wenn Lena in Blizzards Fenster eine andere Fertigkeit waehlt (Enter auf den Eintrag, Taste liegt direkt an der Zeile),
+-- laeuft Sku nicht mit: ein Post-Hook auf ClassTrainer_SetSelection sagt die Auswahl an und baut das Menue neu.
+local tTrainerLastBuiltSelection
+local tTrainerSelectionHooked
+local function tTrainerHookSelection()
+	if tTrainerSelectionHooked or not _G.ClassTrainer_SetSelection then return end
+	tTrainerSelectionHooked = true
+	hooksecurefunc("ClassTrainer_SetSelection", function()
+		C_Timer.After(0.2, function()
+			local tFrame = _G["ClassTrainerFrame"]
+			if not (tFrame and tFrame:IsVisible() == true) then return end
+			local tIdx = tTrainerSelectedIndex()
+			-- nur bei echtem Wechsel nach dem ersten Aufbau (Blizzards Vorauswahl beim Oeffnen bleibt still)
+			if tIdx and tTrainerLastBuiltSelection and tIdx ~= tTrainerLastBuiltSelection then
+				local tOk, tName = pcall(_G.GetTrainerServiceInfo, tIdx)
+				if tOk and tName then
+					tTrainerSay(tName.." "..Sku.deEn("ausgewählt. Zum Lernen den Eintrag Lernen am Ende wählen",
+						"selected. Choose Learn at the end of the list to train it",
+						"sélectionné. Choisissez Apprendre en fin de liste"))
+				end
+			end
+			pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+		end)
+	end)
+end
+
+-- Sagt erst nach Pruefung des Ergebnisses an, ob die Fertigkeit gelernt wurde (Server antwortet asynchron).
+local function tTrainerVerify(aIndex, aName, aIsPet, aCost, aPointsBefore, aMoneyBefore, aRankText)
+	if not tTrainerErrorFrame then
+		tTrainerErrorFrame = CreateFrame("Frame")
+		tTrainerErrorFrame:SetScript("OnEvent", function(_, _, _, aMessage)
+			if type(aMessage) == "string" then tTrainerLastError = aMessage end
+		end)
+	end
+	tTrainerLastError = nil
+	pcall(tTrainerErrorFrame.RegisterEvent, tTrainerErrorFrame, "UI_ERROR_MESSAGE")
+	dprint("trainerBuy", "index", aIndex, "name", tostring(aName), "pet", tostring(aIsPet), "cost", tostring(aCost),
+		"points", tostring(aPointsBefore))
+
+	local function tFinish(aLearned)
+		pcall(tTrainerErrorFrame.UnregisterEvent, tTrainerErrorFrame, "UI_ERROR_MESSAGE")
+		if aLearned then
+			local tText = aName.." "..Sku.deEn("gelernt", "learned", "appris")
+			if aIsPet then
+				local tFree = tTrainerPetPoints()
+				if tFree then
+					tText = tText..", "..Sku.deEn("Ausbildungspunkte frei", "training points left", "points de dressage restants")..": "..tFree
+				end
+			end
+			tTrainerSay(tText)
+		else
+			local tText = aName.." "..Sku.deEn("nicht gelernt", "not learned", "non appris")
+			local tFree = aIsPet and tTrainerPetPoints() or nil
+			if tTrainerLastError and tTrainerLastError ~= "" then
+				tText = tText..". "..tTrainerLastError
+				-- "beherrscht bereits": merken, damit die Fertigkeit beim naechsten Mal nicht mehr in der Liste steht
+				if aIsPet and tTrainerIsAlreadyKnownMessage(tTrainerLastError) then
+					tTrainerKnownStore()[tTrainerKnownKey(aName, aRankText)] = true
+					tText = tText.." "..Sku.deEn("Wird ausgeblendet.", "Will be hidden.", "Sera masqué.")
+				end
+			elseif aIsPet and tFree and tonumber(aCost) and aCost > tFree then
+				tText = tText..". "..Sku.deEn("Zu wenig Ausbildungspunkte", "Not enough training points", "Pas assez de points de dressage")
+					..": "..aCost.." "..Sku.deEn("nötig", "needed", "nécessaires")..", "..tFree.." "..Sku.deEn("frei", "free", "libres")
+			end
+			tTrainerSay(tText)
+		end
+		dprint("trainerBuy", "result", tostring(aLearned), tostring(tTrainerLastError))
+		if _G["ClassTrainerFrame"] and _G["ClassTrainerFrame"]:IsVisible() == true then
+			pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+		end
+	end
+
+	local function tCheck(aFinal)
+		local tName, tState
+		local tOkI, tN, tS = pcall(_G.GetTrainerServiceInfo, aIndex)
+		if tOkI then tName, tState = tN, tS end
+		local tFreeNow = tTrainerPetPoints()
+		local tLearned = (tName ~= aName) or (tState ~= "available")
+			or (aIsPet and aPointsBefore and tFreeNow and tFreeNow < aPointsBefore)
+			or ((not aIsPet) and aMoneyBefore and _G.GetMoney and GetMoney() < aMoneyBefore)
+		if tLearned then
+			tFinish(true)
+		elseif aFinal then
+			tFinish(false)
+		else
+			C_Timer.After(1.0, function() tCheck(true) end)
+		end
+	end
+	C_Timer.After(0.7, function() tCheck(false) end)
+end
+
 function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 
 	-- WoW Forever/Camelot: the trainer window is a new scroll-box UI without the old
 	-- ClassTrainerSkill1..N buttons, so the list is built from the trainer API instead.
 	if not _G["ClassTrainerSkill1"] and _G.GetNumTrainerServices and _G.GetTrainerServiceInfo then
-		local tTrainerName = (UnitName and UnitName("npc")) or ""
-		local tGreeting = tTrainerName ~= "" and tTrainerName or (L["Class Trainer"] or "Trainer")
-		table.insert(aParentChilds, tGreeting)
-		aParentChilds[tGreeting] = {
+		local tIsPet = tTrainerIsPet()
+		local tFreePoints = tIsPet and tTrainerPetPoints() or nil
+
+		local tTitle
+		if tIsPet then
+			-- UnitName("npc") ist bei der Wildtierausbildung leer: es gibt keinen Lehrer, nur das Tier.
+			local tPetName = (UnitName and UnitName("pet")) or ""
+			tTitle = Sku.deEn("Wildtierausbildung", "Beast Training", "Dressage des bêtes")
+			if tPetName ~= "" then tTitle = tTitle..": "..tPetName end
+		else
+			local tTrainerName = (UnitName and UnitName("npc")) or ""
+			tTitle = tTrainerName ~= "" and tTrainerName or (L["Class Trainer"] or "Trainer")
+		end
+		table.insert(aParentChilds, tTitle)
+		aParentChilds[tTitle] = {
 			frameName = "ClassTrainerFrame",
 			RoC = "Child",
 			type = "FontString",
 			obj = _G["ClassTrainerFrame"],
-			textFirstLine = tGreeting,
+			textFirstLine = tTitle,
 			textFull = "",
 			childs = {},
 		}
+
+		if tIsPet then
+			local tPointsText
+			if tFreePoints then
+				tPointsText = Sku.deEn("Ausbildungspunkte frei", "Training points left", "Points de dressage restants")..": "..tFreePoints
+			else
+				tPointsText = Sku.deEn("Ausbildungspunkte unbekannt", "Training points unknown", "Points de dressage inconnus")
+			end
+			table.insert(aParentChilds, tPointsText)
+			aParentChilds[tPointsText] = {
+				frameName = "ClassTrainerFramePoints",
+				RoC = "Child",
+				type = "FontString",
+				obj = nil,
+				textFirstLine = tPointsText,
+				textFull = "",
+				childs = {},
+			}
+		end
 
 		local tStateNames = {
 			available = "lernbar",
@@ -4238,20 +4457,40 @@ function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 		}
 		local tOkNum, tNum = pcall(_G.GetNumTrainerServices)
 		tNum = (tOkNum and tonumber(tNum)) or 0
+		local tSelectedIndex = tTrainerSelectedIndex()
+		tTrainerHookSelection()
+		tTrainerLastBuiltSelection = tSelectedIndex
 		for i = 1, tNum do
 			local tOk, tName, tState, _, _, tRankText = pcall(_G.GetTrainerServiceInfo, i)
 			if tOk and tName and tName ~= "" then
+				local tCost
+				if _G.GetTrainerServiceCost then
+					local tOkC, tCostValue = pcall(_G.GetTrainerServiceCost, i)
+					if tOkC and tonumber(tCostValue) and tCostValue > 0 then tCost = tCostValue end
+				end
+
+				local tStateText = tStateNames[tState] or tostring(tState or "")
+				if tIsPet and tState == "available" and tCost and tFreePoints and tCost > tFreePoints then
+					tStateText = Sku.deEn("zu wenig Punkte", "not enough points", "pas assez de points")
+				end
+				-- bereits gelernt (das Spiel meldet es trotzdem als "lernbar"): nur als "gelernt" auffuehren, nicht auswaehlbar
+				local tKnownSkill = tIsPet and tState == "available" and tTrainerPetSkillKnown(tName, tRankText)
+				if tKnownSkill or (tIsPet and tState == "used") then
+					tStateText = Sku.deEn("gelernt", "learned", "appris")
+				end
+
 				local tLabel = tName
 				if tRankText and tRankText ~= "" then tLabel = tLabel.." "..tRankText end
-				tLabel = tLabel.." ("..(tStateNames[tState] or tostring(tState or ""))..")"
+				tLabel = tLabel.." ("..tStateText..")"
 
 				-- details: description, cost, requirements
 				local tParts = { tName }
 				if tRankText and tRankText ~= "" then tParts[#tParts + 1] = tRankText end
-				if _G.GetTrainerServiceCost then
-					local tOkC, tMoney = pcall(_G.GetTrainerServiceCost, i)
-					if tOkC and tonumber(tMoney) and tMoney > 0 then
-						tParts[#tParts + 1] = (L["Cost"] or "Kosten")..": "..SkuGetCoinText(tMoney, true)
+				if tCost then
+					if tIsPet then
+						tParts[#tParts + 1] = (L["Cost"] or "Kosten")..": "..tCost.." "..Sku.deEn("Ausbildungspunkte", "training points", "points de dressage")
+					else
+						tParts[#tParts + 1] = (L["Cost"] or "Kosten")..": "..SkuGetCoinText(tCost, true)
 					end
 				end
 				if _G.GetTrainerServiceLevelReq then
@@ -4271,26 +4510,67 @@ function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 					if tOkD and type(tDesc) == "string" and tDesc ~= "" then tParts[#tParts + 1] = tDesc end
 				end
 
-
-				local tIndex = i
-				local tCanLearn = (tState == "available")
+				local tRow = (tState == "available" and not tKnownSkill) and tTrainerRowFor(i) or nil
+				if tState == "available" and not tKnownSkill and not tRow then
+					tLabel = tLabel..", "..Sku.deEn("nicht auswählbar, Fenster neu öffnen", "cannot be selected, reopen the window", "non sélectionnable, rouvrez la fenêtre")
+				end
+				if i == tSelectedIndex then
+					tLabel = tLabel..", "..Sku.deEn("ausgewählt", "selected", "sélectionné")
+				end
 				table.insert(aParentChilds, tLabel)
-				aParentChilds[tLabel] = {
+				local tEntry = {
 					RoC = "Child",
 					type = "Button",
-					obj = nil,
+					obj = tRow,
 					textFirstLine = tLabel,
 					textFull = table.concat(tParts, "\r\n"),
 					childs = {},
-					click = tCanLearn,
-					func = tCanLearn and function()
-						pcall(_G.BuyTrainerService, tIndex)
-						pcall(function() SkuOptions.Voice:OutputStringBTtts("sound-notification24", false, true) end)
-						C_Timer.After(0.6, function()
-							if _G["ClassTrainerFrame"] and _G["ClassTrainerFrame"]:IsVisible() == true then
-								pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
-							end
-						end)
+				}
+				if tRow then
+					-- Auswaehlen = sicherer Klick auf Blizzards Zeile (Lernen folgt mit dem Eintrag "Lernen" unten).
+					tEntry.directAction = true
+					tEntry.noMenuNumbers = true
+					-- Der sichere "click"-Weg reicht den Namen der Menue-Taste ("ENTER") an die Zeile weiter, Blizzards Zeile
+					-- reagiert aber nur auf "LeftButton". Deshalb die Taste direkt an die Zeile binden (directClickButton, wie
+					-- beim Verzauberknopf): der Name ist ein globaler Verweis auf die aktuelle Zeile.
+					local tAlias = "SkuTrainerRow"..i
+					_G[tAlias] = tRow
+					tEntry.directClickButton = tAlias
+					tEntry.func = function() end
+				end
+				aParentChilds[tLabel] = tEntry
+			end
+		end
+
+		-- Lernen: sicherer Klick auf Blizzards eigenen Lernen-Knopf fuer die gewaehlte Fertigkeit.
+		local tTrainBtn = _G["ClassTrainerTrainButton"]
+		if tSelectedIndex and tTrainBtn and tTrainBtn:IsVisible() == true then
+			local tOkS, tSelName, tSelState, _, _, tSelRankText = pcall(_G.GetTrainerServiceInfo, tSelectedIndex)
+			if tOkS and tSelName and tSelState == "available" and not (tIsPet and tTrainerPetSkillKnown(tSelName, tSelRankText)) then
+				local tOkC, tSelCost = pcall(_G.GetTrainerServiceCost, tSelectedIndex)
+				tSelCost = (tOkC and tonumber(tSelCost) and tSelCost > 0) and tSelCost or nil
+				local tLearnLabel = Sku.deEn("Lernen", "Learn", "Apprendre")..": "..tSelName
+				local tCanTrain = tTrainBtn:IsEnabled() == true
+				if not tCanTrain then
+					tLearnLabel = tLearnLabel.." ("..Sku.deEn("gerade nicht möglich", "not possible right now", "impossible pour le moment")..")"
+				end
+				local tPointsBefore = tIsPet and tTrainerPetPoints() or nil
+				local tMoneyBefore = _G.GetMoney and GetMoney() or nil
+				local tSelIndex = tSelectedIndex
+				table.insert(aParentChilds, tLearnLabel)
+				aParentChilds[tLearnLabel] = {
+					frameName = "ClassTrainerTrainButton",
+					RoC = "Child",
+					type = "Button",
+					obj = tTrainBtn,
+					textFirstLine = tLearnLabel,
+					textFull = "",
+					noMenuNumbers = true,
+					childs = {},
+					directAction = tCanTrain or nil,
+					secureClickFrame = tCanTrain and tTrainBtn or nil,
+					func = tCanTrain and function()
+						tTrainerVerify(tSelIndex, tSelName, tIsPet, tSelCost, tPointsBefore, tMoneyBefore, tSelRankText)
 					end or nil,
 				}
 			end
