@@ -21,15 +21,14 @@ local tButton
 
 local function tBuildMacro()
    local tPet = Sku.deEn("Begleiter", "Pet", "Familier")
-   local tPercent = Sku.deEn("Prozent", "percent", "pour cent")
    local tDead = Sku.deEn("tot", "dead", "mort")
    local tNone = Sku.deEn("kein Begleiter", "no pet", "pas de familier")
    -- Runs secure: plain numbers inside, only the finished text leaves via SpeakText.
-   return '/run local S,c=C_CombatAudioAlert.SpeakText,Enum.CombatAudioAlertCategory.General '
-      .. 'if not UnitExists("pet") then S("' .. tNone .. '",c,false) '
-      .. 'elseif UnitIsDead("pet") then S("' .. tPet .. ' ' .. tDead .. '",c,false) '
-      .. 'else local h,m=UnitHealth("pet"),UnitHealthMax("pet") '
-      .. 'if m>0 then S("' .. tPet .. ' "..math.ceil(h/m*100).." ' .. tPercent .. '",c,false) end end'
+   -- WICHTIG: eine Makrozeile ist auf 255 Zeichen begrenzt, laengeres wird abgeschnitten (am 07.10. "unexpected symbol near
+   -- <eof>"). Deshalb diese kurze Form; die Laenge steht beim Binden im Log ("PetHealth Makrolaenge").
+   return '/run local u="pet" local S=C_CombatAudioAlert.SpeakText S(UnitExists(u) and (UnitIsDead(u) and "' .. tPet .. ' ' .. tDead
+      .. '" or "' .. tPet .. ' "..math.ceil(UnitHealth(u)/UnitHealthMax(u)*100).."%") or "' .. tNone
+      .. '",Enum.CombatAudioAlertCategory.General,false)'
 end
 
 local function tEnsureButton()
@@ -76,6 +75,31 @@ function SkuCore:UpdatePetHealthBinding()
    if k1 ~= "" then pcall(SetOverrideBindingClick, b, true, k1, "SkuPetHealthButton") end
    if k2 ~= "" then pcall(SetOverrideBindingClick, b, true, k2, "SkuPetHealthButton") end
    dprint("PetHealth", "gebunden", k1, k2)
+   dprint("PetHealth", "Makrolaenge", #tBuildMacro())
+end
+
+-- Normales Spielermakro "Pet HP" (kontoweit), damit die Ansage auch ohne Sku-Taste auf eine Aktionsleisten-Taste gelegt werden kann.
+-- Wird einmal angelegt; danach nur noch der Text aktualisiert (ein geloeschtes Makro wird nicht wieder angelegt).
+-- Makrotext insgesamt maximal 255 Zeichen.
+local MACRO_NAME = "Pet HP"
+local function tEnsureMacro()
+   if InCombatLockdown() or not (_G.GetMacroIndexByName and _G.CreateMacro and _G.EditMacro) then return end
+   local tBody = tBuildMacro()
+   if #tBody > 255 then dprint("PetHealth", "Makro zu lang", #tBody) return end
+   local tIdx = GetMacroIndexByName(MACRO_NAME)
+   if tIdx and tIdx > 0 then
+      local _, _, tCurrent = GetMacroInfo(tIdx)
+      if tCurrent ~= tBody then
+         local tOk, tErr = pcall(EditMacro, tIdx, MACRO_NAME, nil, tBody)
+         dprint("PetHealth", "Makro aktualisiert", tostring(tOk), tostring(tErr))
+      end
+      return
+   end
+   local tStore = SkuSettings:Sub("SkuCore", nil, "char")
+   if tStore.petHpMacroCreated then return end
+   local tOk, tErr = pcall(CreateMacro, MACRO_NAME, "INV_MISC_QUESTIONMARK", tBody, false)
+   dprint("PetHealth", "Makro angelegt", tostring(tOk), tostring(tErr))
+   if tOk then tStore.petHpMacroCreated = true end
 end
 
 local gFrame = CreateFrame("Frame")
@@ -87,5 +111,6 @@ gFrame:SetScript("OnEvent", function(_, aEvent)
    C_Timer.After(1, function()
       local tOk, tErr = pcall(SkuCore.UpdatePetHealthBinding, SkuCore)
       if not tOk then dprint("PetHealth", "Fehler", tostring(tErr)) end
+      pcall(tEnsureMacro)
    end)
 end)

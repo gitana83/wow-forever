@@ -391,6 +391,7 @@ SkuCore.interactFramesListManual = {
 	["CharacterFrame"] = function(...) SkuCore:Build_CharacterFrame(...) end,
 	["PlayerTalentFrame"] = function(...) SkuCore:Build_TalentFrame(...) end,
 	["PlayerSpellsFrame"] = function(...) SkuCore:Build_PlayerSpellsFrame(...) end,
+	["LegacySystemFrame"] = function(...) if SkuCore.Build_LegacySystemFrame then SkuCore:Build_LegacySystemFrame(...) end end,
 	["RolePollPopup"] = function(...) SkuCore:Build_RolePollPopup(...) end,
 	-- ReadyCheckFrame is only a wrapper around ReadyCheckListenerFrame; walked
 	-- generically that wrapper becomes an extra menu level and the Yes/No buttons
@@ -433,6 +434,7 @@ SkuCore.interactFramesList = {
 	"HonorFrame",
 	"PlayerTalentFrame",
 	"PlayerSpellsFrame",
+	"LegacySystemFrame",
 	"InspectFrame",
 	"GuildBankFrame",
 	--"BankFrame",
@@ -4858,6 +4860,7 @@ local friendlyFrameNames = {
 	["SpellBookFrame"] = L["Spellbook"],
 	["PlayerTalentFrame"] = L["Talents"],
 	["PlayerSpellsFrame"] = L["Talents"],
+	["LegacySystemFrame"] = Sku.deEn("Vermächtnis", "Legacy", "Héritage"),
 	["RolePollPopup"] = L["Role Poll"],
 	-- ["PVEFrame"]/["LFGParentFrame"] entfernt (Dungeon-Browser wird neu aufgebaut)
 	["ItemSocketingFrame"] = L["Sockeln"],

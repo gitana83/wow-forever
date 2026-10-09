@@ -2990,6 +2990,9 @@ local function tSpellsFrameTalentsSection(aParentChilds, aTalentsFrame)
 	end
 end
 
+-- Von achievementsForever.lua mitbenutzt (Vermaechtnisbaum ist ein TalentFrameBase wie der Klassentalentbaum).
+SkuCore.BuildTalentTreeSection = tSpellsFrameTalentsSection
+
 local function tBuildPlayerSpellsFrame(aParentChilds)
 	local tFrame = _G["PlayerSpellsFrame"]
 	if not tFrame then return end
@@ -4532,9 +4535,19 @@ function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 					tEntry.noMenuNumbers = true
 					-- Der sichere "click"-Weg reicht den Namen der Menue-Taste ("ENTER") an die Zeile weiter, Blizzards Zeile
 					-- reagiert aber nur auf "LeftButton". Deshalb die Taste direkt an die Zeile binden (directClickButton, wie
-					-- beim Verzauberknopf): der Name ist ein globaler Verweis auf die aktuelle Zeile.
+					-- beim Verzauberknopf). Die Bindung braucht einen echten benannten Knopf, ein globaler Alias der unbenannten Zeile erreicht sie nie.
 					local tAlias = "SkuTrainerRow"..i
-					_G[tAlias] = tRow
+					-- Echter benannter sicherer Knopf als Vermittler: er klickt die (unbenannte) Blizzard-Zeile mit "LeftButton".
+					local tProxy = _G[tAlias]
+					if not (tProxy and tProxy.skuTrainerProxy) then
+						tProxy = CreateFrame("Button", tAlias, UIParent, "SecureActionButtonTemplate")
+						tProxy.skuTrainerProxy = true
+						tProxy:RegisterForClicks("AnyUp", "AnyDown")
+						tProxy:SetAttribute("type", "click")
+					end
+					if SkuState and SkuState:IsInCombat() ~= true then
+						tProxy:SetAttribute("clickbutton", tRow)
+					end
 					tEntry.directClickButton = tAlias
 					tEntry.func = function() end
 				end

@@ -6276,6 +6276,12 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 						-- Refresh the menu after the action completes so
 						-- the user lands on a sensible position. Mirror
 						-- the pattern used by the Linksklick path.
+						-- stayInPlace: der Eintrag bleibt fokussiert (kein Sprung zum Eltern-Eintrag, keine Ansage beim
+						-- Neuaufbau). Fuer Aktionen mit eigener Rueckmeldung, z.B. Abfrage mit anschliessender Ansage.
+						if aGossipListTable[index].stayInPlace == true then
+							pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+							return
+						end
 						if SkuOptions and SkuOptions.currentMenuPosition and SkuOptions.currentMenuPosition.parent then
 							SkuOptions.currentMenuPosition = SkuOptions.currentMenuPosition.parent
 						end
@@ -6613,6 +6619,11 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 							else
 								-- Klassischer Pfad — unverändert.
 								aGossipListTable[index].func(aGossipListTable[index].obj, "LeftButton")
+								-- stayInPlace: ein stiller Neuaufbau genuegt (keine zweite Ansage, kein Nach-Refresh); der Eintrag meldet sich bei Bedarf selbst.
+								if aGossipListTable[index].stayInPlace == true then
+									pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+									return
+								end
 								if not aGossipListTable[index].obj or not aGossipListTable[index].obj:GetName() then
 									SkuCore:CheckFrames()
 								else
