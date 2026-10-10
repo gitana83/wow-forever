@@ -1,3 +1,19 @@
+-- [Diagnose 10.10.2026] Fehler beim Laden der Dateien (Bibliotheken, Embeds) fangen, bevor Skus Fehlerlog existiert.
+-- Ohne Questie fehlte AceDB:New und niemand wusste warum; solche Ladefehler landeten bisher in keinem Log.
+-- SkuCore/ErrorLog.lua uebernimmt SkuEarlyErrors beim Login.
+SkuEarlyErrors = SkuEarlyErrors or {}
+do
+	local tPrev = geterrorhandler and geterrorhandler() or nil
+	if seterrorhandler then
+		seterrorhandler(function(aErr)
+			if #SkuEarlyErrors < 40 then
+				SkuEarlyErrors[#SkuEarlyErrors + 1] = { msg = tostring(aErr), stack = debugstack and debugstack(2, 6, 0) or "" }
+			end
+			if tPrev then return tPrev(aErr) end
+		end)
+	end
+end
+
 -- [Workstream 3 / load profiling] Per-file load-time harness (TEMPORARY, measurement only).
 --
 -- A tiny stamp recorder driven by the _ps*.lua stub files interleaved in the TOC

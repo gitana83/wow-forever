@@ -358,10 +358,10 @@ local function tBuildTree(aList)
 				tRebuildSoon()
 			end)
 		end
-		tAdd(tChilds, tLabel, { type = "Button", obj = nil, textFull = "", childs = tTreeChilds })
+		tAdd(tChilds, tLabel, { type = "Button", obj = nil, textFull = "", childs = tTreeChilds, menuId = "legacytree "..i })
 	end
 
-	tAdd(aList, tHead, { type = "Button", obj = nil, textFull = "", childs = tChilds })
+	tAdd(aList, tHead, { type = "Button", obj = nil, textFull = "", childs = tChilds, menuId = "legacytreepage" })
 end
 
 function SkuCore:Build_LegacySystemFrame(aParentChilds)

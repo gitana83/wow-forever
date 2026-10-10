@@ -1,4 +1,4 @@
-﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local MODULE_NAME = "SkuOptions"
@@ -152,7 +152,17 @@ end
 ---@param input string
 function SkuOptions:SlashFuncPquit(input)
 	--print("SlashFuncPquit", input)
-	LeaveParty()
+	-- [Forever] Das globale LeaveParty gibt es dort nicht mehr, nur C_PartyInfo.LeaveParty (wie im Menue "Gruppe verlassen", SkuMob/Options.lua).
+	if _G.C_PartyInfo and _G.C_PartyInfo.LeaveParty then
+		_G.C_PartyInfo.LeaveParty()
+	elseif _G.LeaveParty then
+		LeaveParty()
+	else
+		return
+	end
+	if L["MOB_GroupLeft"] and L["MOB_GroupLeft"] ~= "MOB_GroupLeft" then
+		pcall(function() SkuOptions.Voice:OutputStringBTtts(L["MOB_GroupLeft"], true, true, 0.2) end)
+	end
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -810,6 +820,39 @@ function SkuOptions:UpdateOverviewText(aPageId)
 				if name ~= tPlayerName then
 					tCount = tCount + 1
 					tTmpText = tTmpText..tCount.." "..name..", "..class..", "..level..", "..(tPartyRoles[name] or "")..", "..zone..", "..online..", "..isDead.."\r\n"
+				end
+			end
+		end
+	end
+
+	-- [Forever] In einer normalen Gruppe (kein Raid) liefert GetRaidRosterInfo dort nichts: die Mitglieder dann direkt ueber
+	-- party1..party4 lesen. Zone ueber die Karte der Einheit, falls das Spiel sie nennt.
+	local tNumMembers = (_G.GetNumGroupMembers and GetNumGroupMembers()) or 0
+	dprint("partyOverview", "members", tNumMembers, "rosterFound", tCount - 1)
+	if tCount == 1 and tNumMembers > 1 then
+		for q = 1, 4 do
+			local tUnit = "party"..q
+			if UnitExists(tUnit) then
+				local tOk, tLine = pcall(function()
+					local tName = UnitName(tUnit)
+					if not tName then return nil end
+					local tClass = UnitClass(tUnit) or ""
+					local tLevel = UnitLevel(tUnit) or ""
+					local tZone = ""
+					local tMapID = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit(tUnit)
+					if tMapID and C_Map.GetMapInfo then
+						local tMapInfo = C_Map.GetMapInfo(tMapID)
+						tZone = tMapInfo and tMapInfo.name or ""
+					end
+					local tOnline = UnitIsConnected(tUnit) and L["online"] or L["offline"]
+					local tDead = UnitIsDeadOrGhost(tUnit) and L["tot"] or L["lebt"]
+					return tName..", "..tClass..", "..tLevel..", "..(tPartyRoles[tName] or "")..", "..tZone..", "..tOnline..", "..tDead
+				end)
+				if tOk and tLine then
+					tCount = tCount + 1
+					tTmpText = tTmpText..tCount.." "..tLine.."\r\n"
+				else
+					dprint("partyOverview", "Mitglied nicht lesbar", tUnit, tostring(tLine))
 				end
 			end
 		end
@@ -4572,6 +4615,17 @@ function SkuOptions:OnInitialize()
 			tSv.profileKeys[(UNKNOWNOBJECT or "Unknown") .. " - " .. tRealm] = tSv.profileKeys[tStableKey]
 		end
 	end)
+	-- [Diagnose 10.10.2026] Datenbank fehlte nach dem Forever-Update: genau festhalten, was an dieser Stelle nil ist.
+	do
+		local tLib, tMinor = nil, nil
+		if type(LibStub) == "table" or type(LibStub) == "function" then tLib, tMinor = LibStub("AceDB-3.0", true) end
+		dprint("DBInit", "LibStub", type(LibStub), "AceDB", type(tLib), "minor", tostring(tMinor), "New", type(tLib and tLib.New),
+			"SkuOptionsDB", type(_G.SkuOptionsDB), "UNKNOWNOBJECT", tostring(UNKNOWNOBJECT), "name", tostring(UnitName and UnitName("player")))
+		if not (tLib and tLib.New) then
+			-- Notbehelf: die eigene Bibliothek nachladen laesst sich hier nicht; die Ursache steht jetzt im Log.
+			error("Sku: AceDB-3.0:New fehlt (LibStub=" .. type(LibStub) .. ", AceDB=" .. type(tLib) .. ", minor=" .. tostring(tMinor) .. ")")
+		end
+	end
 	SkuOptions.db = LibStub("AceDB-3.0"):New("SkuOptionsDB", defaults, true)
 	-- AceDB fixes its character key when the library loads, which can be a
 	-- spelling the pre-pass above never saw (e.g. name + surname). That key then
@@ -6618,10 +6672,41 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 								end
 							else
 								-- Klassischer Pfad — unverändert.
+								-- stayInPlace: Position (Elternliste + Zeilennummer) vorher merken
+								local tStayParent, tStayParentKey, tStayIndex
+								if aGossipListTable[index].stayInPlace == true then
+									local tCur = SkuOptions.currentMenuPosition
+									tStayParent = tCur and tCur.parent
+									if tStayParent and tStayParent.children then
+										tStayParentKey = tStayParent.id or tStayParent.name
+										for x = 1, #tStayParent.children do
+											if tStayParent.children[x] == tCur then tStayIndex = x break end
+										end
+									end
+								end
 								aGossipListTable[index].func(aGossipListTable[index].obj, "LeftButton")
 								-- stayInPlace: ein stiller Neuaufbau genuegt (keine zweite Ansage, kein Nach-Refresh); der Eintrag meldet sich bei Bedarf selbst.
 								if aGossipListTable[index].stayInPlace == true then
 									pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+									-- Der Neuaufbau setzt den Fokus teils auf den ersten Eintrag der Liste zurueck: nachpruefen und
+									-- auf die gemerkte Zeile zurueckstellen, solange wir noch in derselben Liste stehen.
+									if tStayIndex and _G.C_Timer and _G.C_Timer.After then
+										local function tRestoreStay()
+											local tNow = SkuOptions.currentMenuPosition
+											local tNowParent = tNow and tNow.parent
+											if tNowParent and tNowParent.children and (tNowParent.id or tNowParent.name) == tStayParentKey then
+												local tTarget = tNowParent.children[tStayIndex]
+												if tTarget and tTarget ~= tNow and tNow == tNowParent.children[1] then
+													SkuOptions.currentMenuPosition = tTarget
+													if SkuOptions.VocalizeCurrentMenuName then
+														pcall(function() SkuOptions:VocalizeCurrentMenuName() end)
+													end
+												end
+											end
+										end
+										_G.C_Timer.After(0.3, tRestoreStay)
+										_G.C_Timer.After(0.8, tRestoreStay)
+									end
 									return
 								end
 								if not aGossipListTable[index].obj or not aGossipListTable[index].obj:GetName() then
@@ -7221,6 +7306,11 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 			tNewMenuEntry.sorting = true
 			if aGossipListTable[index].noMenuNumbers then
 				tNewMenuEntry.noMenuNumbers = true
+			end
+			-- menuId: stabiler Pfad-Name fuer Eintraege, deren Anzeigename sich beim Neuaufbau aendert (z.B. Punktzahl im Ast-Namen);
+			-- CheckFrames merkt sich den Pfad damit und findet die Stelle wieder.
+			if aGossipListTable[index].menuId then
+				tNewMenuEntry.id = aGossipListTable[index].menuId
 			end
 			-- [Rezept-Tooltip] auch Eintraege MIT Untermenue (Berufe-Fenster auf Forever: Rezept mit Herstellen-Aktionen)
 			if aGossipListTable[index].skuRecipeInfo then

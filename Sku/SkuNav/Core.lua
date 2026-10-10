@@ -2766,8 +2766,15 @@ end
 
 --------------------------------------------------------------------------------------------------------------------------------------
 function SkuNav:StartReverseRtFollow()
-	--dprint("StartReverseRtFollow")
+	-- [Diagnose 10.10.2026] Strg-Shift-Z im Kampf: es kam keine Reaktion. Jetzt wird der Tastendruck festgehalten und eine fehlende
+	-- Umkehr-Route auch gesagt, statt still zurueckzukehren.
+	dprint("StartReverseRtFollow", "Taste", "combat", tostring(InCombatLockdown() == true),
+		"start", tostring(SkuNav.ReverseRt and SkuNav.ReverseRt.meta and SkuNav.ReverseRt.meta.metapathFollowingStart),
+		"folgt", tostring(SkuSettings:Sub("SkuNav").metapathFollowing), "wp", tostring(SkuSettings:Sub("SkuNav").selectedWaypoint))
 	if not SkuNav.ReverseRt.meta.metapathFollowingStart then
+		pcall(function()
+			SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Keine Route zum Umkehren", "No route to reverse", "Aucun itinéraire à inverser"), false, true, 0.2, nil, nil, nil, 1)
+		end)
 		return
 	end
 

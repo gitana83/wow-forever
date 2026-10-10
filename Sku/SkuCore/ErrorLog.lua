@@ -43,6 +43,7 @@ local COMBAT_MAX_PER_SEC = 5
 local tCombatErrorCount  = 0
 local tCombatLastReset   = 0
 local tInCombat          = false
+local tCombatBlockedSeen  = {} -- ADDON_ACTION_*-Meldungen, die im Kampf schon einmal festgehalten wurden
 local tBugGrabberPaused  = false
 
 -- Localization (safe access — works before Sku.L is loaded)
@@ -344,6 +345,13 @@ f:SetScript("OnEvent", function(self, event, arg1, arg2, arg3)
       tAttachMethods()
       SEL = _G.SkuErrorLog
       tRecordSession()
+      -- Fehler, die beim Laden der Dateien auftraten, bevor dieses Log existierte (siehe SkuPerfFileStamp.lua)
+      if type(_G.SkuEarlyErrors) == "table" then
+         for _, tE in ipairs(_G.SkuEarlyErrors) do
+            tSafeCall(function() tAppend("early_load", tE.msg, tE.stack) end)
+         end
+         _G.SkuEarlyErrors = {}
+      end
       if SkuErrorLog and SkuErrorLog.config and SkuErrorLog.config.enabled ~= false then
          DEFAULT_CHAT_FRAME:AddMessage("|cff80c0ffSkuErrorLog|r " .. tL("ERRLOG_Active", "aktiv. /skulog für Übersicht."))
       end
@@ -372,14 +380,22 @@ f:SetScript("OnEvent", function(self, event, arg1, arg2, arg3)
          and Sku and Sku.NoteScriptExecutionLimit then
          pcall(function() Sku:NoteScriptExecutionLimit() end)
       end
-   elseif event == "ADDON_ACTION_FORBIDDEN" then
-      tAppend("addon_action_forbidden",
-              "addon=" .. tostring(arg1) .. " action=" .. tostring(arg2),
-              debugstack(2, 6, 2) or "")
-   elseif event == "ADDON_ACTION_BLOCKED" then
-      tAppend("addon_action_blocked",
-              "addon=" .. tostring(arg1) .. " action=" .. tostring(arg2),
-              debugstack(2, 6, 2) or "")
+   elseif event == "ADDON_ACTION_FORBIDDEN" or event == "ADDON_ACTION_BLOCKED" then
+      -- Im Kampf kommen diese Meldungen in Schueben (Pet-Leiste: 27-80 pro Sekunde, Log 10.10.2026). debugstack und das Eintragen
+      -- sind teuer und waren eine Ursache fuer Ruckler im Kampf. Dieselbe Meldung im Kampf nur einmal je Sitzung festhalten.
+      local tMsg = "addon=" .. tostring(arg1) .. " action=" .. tostring(arg2)
+      if tInCombat then
+         if tCombatBlockedSeen[tMsg] then
+            local tLog = _G.SkuErrorLog
+            if type(tLog) == "table" and type(tLog.counters) == "table" then
+               tLog.counters.dropped = (tLog.counters.dropped or 0) + 1
+            end
+            return
+         end
+         tCombatBlockedSeen[tMsg] = true
+      end
+      tAppend(event == "ADDON_ACTION_FORBIDDEN" and "addon_action_forbidden" or "addon_action_blocked",
+              tMsg, debugstack(2, 6, 2) or "")
    elseif event == "PLAYER_REGEN_DISABLED" then
       -- Kampfbeginn: Throttle aktivieren, BugGrabber-Bridge pausieren
       tInCombat = true

@@ -294,12 +294,18 @@ local tCount = function(t)
   return count
 end
 
-local colorPoor = ITEM_QUALITY_COLORS[LE_ITEM_QUALITY_POOR].color
+-- Forever: ITEM_QUALITY_COLORS ist beim Laden noch leer bzw. LE_ITEM_QUALITY_* fehlen -> Fehler "attempt to index field '?'", die
+-- Bibliothek brach hier ab (10.10.2026). Mit Rueckfallfarben, wo der Eintrag fehlt; andere Clients bekommen dieselben Farben wie bisher.
+local function tQualityColor(aQuality, aR, aG, aB)
+  local tEntry = _G.ITEM_QUALITY_COLORS and _G.ITEM_QUALITY_COLORS[aQuality]
+  return (tEntry and tEntry.color) or CreateColor(aR, aG, aB, 1)
+end
+local colorPoor = tQualityColor(_G.LE_ITEM_QUALITY_POOR or 0, 0.62, 0.62, 0.62)
 local gradientColors = {
-  ITEM_QUALITY_COLORS[LE_ITEM_QUALITY_UNCOMMON].color,
-  ITEM_QUALITY_COLORS[LE_ITEM_QUALITY_RARE].color,
-  ITEM_QUALITY_COLORS[LE_ITEM_QUALITY_EPIC].color,
-  ITEM_QUALITY_COLORS[LE_ITEM_QUALITY_LEGENDARY].color,
+  tQualityColor(_G.LE_ITEM_QUALITY_UNCOMMON or 2, 0.12, 1, 0),
+  tQualityColor(_G.LE_ITEM_QUALITY_RARE or 3, 0, 0.44, 0.87),
+  tQualityColor(_G.LE_ITEM_QUALITY_EPIC or 4, 0.64, 0.21, 0.93),
+  tQualityColor(_G.LE_ITEM_QUALITY_LEGENDARY or 5, 1, 0.5, 0),
 }
 local colorPass, colorFail = CreateColor(0,1,0,1), CreateColor(1,0,0,1)
 local function ColorGradient(percent, colors)

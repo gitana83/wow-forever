@@ -20,15 +20,11 @@ if not Sku or not Sku.isForever then return end
 local tButton
 
 local function tBuildMacro()
-   local tPet = Sku.deEn("Begleiter", "Pet", "Familier")
-   local tDead = Sku.deEn("tot", "dead", "mort")
-   local tNone = Sku.deEn("kein Begleiter", "no pet", "pas de familier")
-   -- Runs secure: plain numbers inside, only the finished text leaves via SpeakText.
-   -- WICHTIG: eine Makrozeile ist auf 255 Zeichen begrenzt, laengeres wird abgeschnitten (am 07.10. "unexpected symbol near
-   -- <eof>"). Deshalb diese kurze Form; die Laenge steht beim Binden im Log ("PetHealth Makrolaenge").
-   return '/run local u="pet" local S=C_CombatAudioAlert.SpeakText S(UnitExists(u) and (UnitIsDead(u) and "' .. tPet .. ' ' .. tDead
-      .. '" or "' .. tPet .. ' "..math.ceil(UnitHealth(u)/UnitHealthMax(u)*100).."%") or "' .. tNone
-      .. '",Enum.CombatAudioAlertCategory.General,false)'
+   -- Der fruehere /run-Weg (UnitHealth("pet") selbst rechnen, per SpeakText sagen) scheitert: auch ein /run-Makro laeuft als
+   -- "ForceTaint_Strong" und darf mit dem geheimen Pet-Wert nicht rechnen (Fehlerlog 10.10.2026 "arithmetic on a secret number
+   -- value", die Taste blieb stumm). Neuer Weg ohne eigenes Rechnen: das Begleiter-Tier anvisieren, dann sagt Blizzards eigene
+   -- Ziel-Gesundheit-Ansage (Kampfansagen, "Gesundheit des Ziels") den Wert. Das Makro ist reiner Text, kein Lua.
+   return '/target pet'
 end
 
 local function tEnsureButton()
@@ -63,6 +59,9 @@ function SkuCore:UpdatePetHealthBinding()
    local kb = SkuOptions.db and SkuOptions.db.profile and SkuOptions.db.profile["SkuOptions"]
       and SkuOptions.db.profile["SkuOptions"].SkuKeyBinds
    local e = kb and kb["SKU_KEY_PETHEALTH"]
+   -- Lena nutzt das Makro "Pet HP": die frueher voreingestellte Taste Strg-Shift-K wird freigegeben (einmalig aus dem Profil entfernt).
+   if e and e.key == "CTRL-SHIFT-K" then e.key = "" end
+   if e and e.key2 == "CTRL-SHIFT-K" then e.key2 = "" end
    local k1 = e and e.key or ""
    local k2 = e and e.key2 or ""
 

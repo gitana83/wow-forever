@@ -2772,9 +2772,11 @@ local function tSpellsFrameClick(aButton, aMouseButton)
 	end
 end
 
-local function tSpellsFrameAction(aParentChilds, aLabel, aFunc, aFull, aEnabled)
+-- aStay: der Fokus bleibt nach der Aktion auf dem Eintrag (Talentpunkt vergeben/zuruecknehmen), kein Sprung zum Eltern-Eintrag.
+local function tSpellsFrameAction(aParentChilds, aLabel, aFunc, aFull, aEnabled, aStay)
 	local tFrame = _G["PlayerSpellsFrame"]
 	return tTalentAdd(aParentChilds, aLabel, {
+		stayInPlace = aStay and true or nil,
 		frameName = "PlayerSpellsFrameAction",
 		RoC = "Child",
 		type = "Button",
@@ -2839,6 +2841,7 @@ local function tSpellsFrameNodeEntry(aParentChilds, aTalentsFrame, aConfigID, aB
 			tLabel = tLabel .. " (" .. L["disabled"] .. ")"
 		end
 		local tNode = tTalentAdd(aParentChilds, tLabel, {
+			menuId = "talentchoice " .. tostring(aNodeInfo.ID),
 			frameName = "PlayerSpellsFrameChoice",
 			RoC = "Child",
 			type = "Button",
@@ -2854,11 +2857,11 @@ local function tSpellsFrameNodeEntry(aParentChilds, aTalentsFrame, aConfigID, aB
 			if tEntryID ~= tSelectedID and not tIsLocked then
 				tEntryFunc = function() aButton:SetSelectedEntryID(tEntryID) end
 			end
-			tSpellsFrameAction(tNode.childs, tSub, tEntryFunc, tDesc or "")
+			tSpellsFrameAction(tNode.childs, tSub, tEntryFunc, tDesc or "", nil, true)
 		end
 		-- zuruecknehmen
 		if aButton.CanRefundRank and aButton:CanRefundRank() and tSelectedID then
-			tSpellsFrameAction(tNode.childs, (_G.TALENT_FRAME_REFUND or "Refund"), tSpellsFrameClick(aButton, "RightButton"))
+			tSpellsFrameAction(tNode.childs, (_G.TALENT_FRAME_REFUND or "Refund"), tSpellsFrameClick(aButton, "RightButton"), nil, nil, true)
 		end
 		return
 	end
@@ -2875,9 +2878,9 @@ local function tSpellsFrameNodeEntry(aParentChilds, aTalentsFrame, aConfigID, aB
 	elseif tIsLocked or not tCanBuy then
 		tLabel = tLabel .. " (" .. L["disabled"] .. ")"
 	end
-	tSpellsFrameAction(aParentChilds, tLabel, tSpellsFrameClick(aButton, "LeftButton"), tDesc or "", tCanBuy and true or false)
+	tSpellsFrameAction(aParentChilds, tLabel, tSpellsFrameClick(aButton, "LeftButton"), tDesc or "", tCanBuy and true or false, true)
 	if aButton.CanRefundRank and aButton:CanRefundRank() then
-		tSpellsFrameAction(aParentChilds, (_G.TALENT_FRAME_REFUND or "Refund") .. ": " .. tName, tSpellsFrameClick(aButton, "RightButton"))
+		tSpellsFrameAction(aParentChilds, (_G.TALENT_FRAME_REFUND or "Refund") .. ": " .. tName, tSpellsFrameClick(aButton, "RightButton"), nil, nil, true)
 	end
 end
 
@@ -2973,6 +2976,7 @@ local function tSpellsFrameTalentsSection(aParentChilds, aTalentsFrame)
 	for _, tBranch in ipairs(tBranches) do
 		if #tBranch.nodes > 0 then
 			local tBranchEntry = tTalentAdd(aParentChilds, L["Tab"] .. " " .. tBranch.name .. " (" .. tBranch.points .. ")", {
+				menuId = "talentbranch " .. tostring(tBranch.name):gsub(",", " "),
 				frameName = "PlayerSpellsFrameBranch",
 				RoC = "Child",
 				type = "Button",

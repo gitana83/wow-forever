@@ -1923,10 +1923,21 @@ function SkuCore:OnEnable()
 				if happiness and (
 					-- either happiness has just increased due to feeding, so let player know new happiness level
 					SkuCoreOldPetHappiness and SkuCoreOldPetHappiness < happiness
+						-- oder gerade gesunken (Tier wird hungrig/unzufrieden): sofort sagen, nicht erst nach 60 s (nur Forever)
+						or Sku.isForever and SkuCoreOldPetHappiness and SkuCoreOldPetHappiness > happiness
 						-- or alert player periodically when pet is not happy
 						or SkuCoreOldPetHappinessCounter > 60 and (happiness == 1 or happiness == 2)
 					) then
-					SkuOptions.Voice:OutputString(L["Pet"] .. ";" .. SkuCore.PetHappinessString[happiness], false, true, 0.2)
+					-- Forever: OutputString spielt Aufnahmen ("pet" + Stimmung); die fehlen, im Log 10.10.2026 blieb die Ansage stumm
+					-- (Wert kam an, Zaehler 62, nichts gesprochen). Deshalb Sprachausgabe wie die uebrigen Forever-Ansagen.
+					-- Nur Forever: Auf Clients mit Sprachpaket bleibt es bei der Aufnahme-Ansage wie bisher.
+					local tSayOk = false
+					if Sku.isForever then
+						tSayOk = pcall(function()
+							SkuOptions.Voice:OutputStringBTtts(L["Pet"] .. ": " .. SkuCore.PetHappinessString[happiness], false, true, 0.2, nil, nil, nil, 1)
+						end)
+					end
+					if not tSayOk then pcall(function() SkuOptions.Voice:OutputString(L["Pet"] .. ";" .. SkuCore.PetHappinessString[happiness], false, true, 0.2) end) end
 					SkuCoreOldPetHappinessCounter = 0
 				end
 				SkuCoreOldPetHappiness = happiness
@@ -5581,15 +5592,15 @@ function SkuCore:CheckFrames(aForceLocalRoot, aDontClose, aQuiet)
 						end
 					end
 
-					tBread = SkuOptions.currentMenuPosition.parent.name
+					tBread = SkuOptions.currentMenuPosition.parent.id or SkuOptions.currentMenuPosition.parent.name
 					if tTable.parent then
 						while tTable and tTable.parent and tTable.parent.name do
 							tFirstFrame = tTable.name
 							tTable = tTable.parent
 							if tBread then
-								tBread = tTable.name..","..tBread
+								tBread = (tTable.id or tTable.name)..","..tBread
 							else
-								tBread = tTable.name
+								tBread = tTable.id or tTable.name
 							end
 						end
 					end

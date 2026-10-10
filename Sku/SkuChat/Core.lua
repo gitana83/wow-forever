@@ -2436,6 +2436,66 @@ function SkuChat:OnDisable()
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+-- Tooltip-Text eines Gegenstands-Links. Auf Forever hat der Scan-Tooltip kein SetHyperlink (Fehler "attempt to call a nil value" in
+-- der Chat-Navigation, 10.10.2026: dadurch brach die ganze Tastenbehandlung ab und die Registerkarten liessen sich nicht umschalten).
+-- Erste Wahl ist Blizzards Tooltip-Daten-API (C_TooltipInfo), der Scan-Tooltip nur als Rueckfall. Gibt den Text oder "" zurueck.
+function SkuChat:ItemLinkTooltipText(aLink)
+	if type(aLink) ~= "string" then return "" end
+	local tBare = string.match(aLink, "|H(item:[^|]+)|h") or string.match(aLink, "(item:[%d:%-]+)") or aLink
+	local tId = tonumber(string.match(tBare, "item:(%d+)"))
+
+	-- Clients, deren Scan-Tooltip SetHyperlink kann (alle ausser Forever): unveraendert der bisherige Weg.
+	local tLegacyTip = _G["SkuScanningTooltip"]
+	if tLegacyTip and tLegacyTip.SetHyperlink then
+		pcall(tLegacyTip.SetHyperlink, tLegacyTip, aLink)
+		local tLegacyLines = TooltipLines_helper(tLegacyTip:GetRegions())
+		SkuUtil:ResetScanningTooltip()
+		if tLegacyLines and tLegacyLines ~= "" and tLegacyLines ~= "asd" then
+			return SkuUtil:Unescape(tLegacyLines)
+		end
+		return ""
+	end
+
+	if _G.C_TooltipInfo then
+		local tData
+		if _G.C_TooltipInfo.GetHyperlink then
+			local tOk, tD = pcall(_G.C_TooltipInfo.GetHyperlink, tBare)
+			if tOk then tData = tD end
+		end
+		if not tData and tId and _G.C_TooltipInfo.GetItemByID then
+			local tOk, tD = pcall(_G.C_TooltipInfo.GetItemByID, tId)
+			if tOk then tData = tD end
+		end
+		if type(tData) == "table" and type(tData.lines) == "table" then
+			local tOut = {}
+			for _, tLine in ipairs(tData.lines) do
+				local tLeft, tRight = tLine.leftText, tLine.rightText
+				if type(tLeft) == "string" and tLeft ~= "" and not string.find(tLeft, "Open Issue Report", 1, true) then
+					if type(tRight) == "string" and tRight ~= "" then tLeft = tLeft.." "..tRight end
+					tOut[#tOut + 1] = tLeft
+				end
+			end
+			if #tOut > 0 then
+				return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
+			end
+		end
+	end
+
+	local tTip = _G["SkuScanningTooltip"]
+	if tTip and tTip.SetHyperlink then
+		pcall(tTip.SetHyperlink, tTip, aLink)
+		local tLines = TooltipLines_helper(tTip:GetRegions())
+		SkuUtil:ResetScanningTooltip()
+		if tLines and tLines ~= "" and tLines ~= "asd" then
+			return SkuUtil:Unescape(tLines)
+		end
+	elseif tId and C_Item and C_Item.RequestLoadItemDataByID then
+		pcall(C_Item.RequestLoadItemDataByID, tId)
+	end
+	return ""
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
 -- The global ChatEdit_UpdateHeader is only an alias from Blizzard_DeprecatedChatInfo,
 -- and that whole file returns early unless the CVar loadDeprecationFallbacks is on.
 -- With the CVar off the global is nil, the call throws, and everything after it in
@@ -2729,15 +2789,10 @@ function SkuChat:OnInitialize()
 			if self.menuOpen == false then
 				for w = 1, #tLineData.itemLinks do
 					local ltSkuCurrentLineDatalinktTextFirstLine, ltSkuCurrentLineDatalinktTextFull = "", ""
-					_G["SkuScanningTooltip"]:SetHyperlink(tLineData.itemLinks[w])
-
-					if TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()) ~= "asd" then
-						if TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()) ~= "" then
-							local tText = SkuUtil:Unescape(TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()))
-							ltSkuCurrentLineDatalinktTextFirstLine, ltSkuCurrentLineDatalinktTextFull = SkuCore:ItemName_helper(tText)
-						end
+					local tText = SkuChat:ItemLinkTooltipText(tLineData.itemLinks[w])
+					if tText ~= "" then
+						ltSkuCurrentLineDatalinktTextFirstLine, ltSkuCurrentLineDatalinktTextFull = SkuCore:ItemName_helper(tText)
 					end
-					SkuUtil:ResetScanningTooltip()
 
 					if ltSkuCurrentLineDatalinktTextFirstLine ~= "" then
 						if w == 1 then
@@ -2825,15 +2880,10 @@ function SkuChat:OnInitialize()
 					for w = 1, #tLineDataitemLinks do
 						local ltSkuCurrentLineDatalinktTextFirstLine, ltSkuCurrentLineDatalinktTextFull = "", ""
 						local ltSkuCurrentLineDatalinktItemId = ""
-						_G["SkuScanningTooltip"]:SetHyperlink(tLineDataitemLinks[w])
-
-						if TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()) ~= "asd" then
-							if TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()) ~= "" then
-								local tText = SkuUtil:Unescape(TooltipLines_helper(_G["SkuScanningTooltip"]:GetRegions()))
-								ltSkuCurrentLineDatalinktTextFirstLine, ltSkuCurrentLineDatalinktTextFull = SkuCore:ItemName_helper(tText)
-							end
+						local tText = SkuChat:ItemLinkTooltipText(tLineDataitemLinks[w])
+						if tText ~= "" then
+							ltSkuCurrentLineDatalinktTextFirstLine, ltSkuCurrentLineDatalinktTextFull = SkuCore:ItemName_helper(tText)
 						end
-						SkuUtil:ResetScanningTooltip()
 						if ltSkuCurrentLineDatalinktTextFirstLine ~= "" then
 							local tNewMenuEntry = SkuOptions:InjectMenuItems(SkuOptions.Menu, {L["link"].." "..w.." "..ltSkuCurrentLineDatalinktTextFirstLine}, SkuGenericMenuItem)
 							tNewMenuEntry.tSkuCurrentLineDatalinktTextFirstLine = ltSkuCurrentLineDatalinktTextFirstLine
@@ -3751,6 +3801,12 @@ local function tSpeakChannelSoon(aLabel)
 			tLastAnnouncedChatHeader = nil
 			return
 		end
+		-- Fokus schon weg (Escape/Abschicken): Blizzards UpdateHeader laeuft beim Schliessen noch einmal durch und sagte den
+		-- Kanal dann ein zweites Mal an (Log 10.10.2026: "focus lost" -> "Oeffnen auf" -> "spricht").
+		if ChatFrame1EditBox.HasFocus and not ChatFrame1EditBox:HasFocus() then
+			dprint("chatChannel", "spricht nicht, Fokus weg", tostring(tChannelPendingLabel))
+			return
+		end
 		dprint("chatChannel", "spricht", tostring(tChannelPendingLabel))
 		pcall(function()
 			SkuOptions.Voice:OutputStringBTtts(tChannelPendingLabel, {overwrite = true, wait = false, length = 0.05, engine = 2, ignoreLinks = true})
@@ -4608,9 +4664,23 @@ function SkuChat:InitTab(tNewTabIndex)
 
 	--AddMessage handler
 	function a:AddMessage(messageTypeGroup, body, r, g, b, id, accessID, typeID, arg2)
-		
+
 		if messageTypeGroup ~= "ADDON" then
 			--print(messageTypeGroup, body, r, g, b, id, accessID, typeID, arg2)
+		end
+
+		-- Doppelte Zustellung (Log 10.10.2026: jede Gruppennachricht wurde zweimal gesprochen, 2-5 s auseinander): dieselbe Zeile
+		-- kam in kurzem Abstand zweimal in demselben Fenster an. Gleiche Gruppe + gleicher Text + gleiche Zugangs-ID innerhalb 0.4 s
+		-- in diesem Fenster zaehlt als dieselbe Nachricht und wird nicht noch einmal verarbeitet.
+		if Sku.isForever and type(body) == "string" then
+			local tNowDup = GetTime()
+			local tKeyDup = tostring(messageTypeGroup) .. "\1" .. body .. "\1" .. tostring(accessID)
+			if a.skuLastMsgKey == tKeyDup and (tNowDup - (a.skuLastMsgTime or 0)) < 0.4 then
+				dprint("chatDup", "doppelte Zustellung verworfen", tostring(messageTypeGroup), tostring(a.tab and a.tab.name))
+				return
+			end
+			a.skuLastMsgKey = tKeyDup
+			a.skuLastMsgTime = tNowDup
 		end
 		
 		local tLink = string.match(body, "|Hitem:(.+)|h%[")
@@ -4708,6 +4778,21 @@ function SkuChat:InitTab(tNewTabIndex)
 			local tIsBareAuctionCreated = (messageTypeGroup == "SYSTEM")
 				and (type(ERR_AUCTION_STARTED) == "string")
 				and (body == ERR_AUCTION_STARTED)
+
+			-- Gleicher Text in kurzem Abstand schon gesprochen (egal von welchem Fenster/Tab): nicht noch einmal sprechen. Verlauf und
+			-- Neue-Nachricht-Ton laufen unveraendert weiter.
+			local tNowSpeak = GetTime()
+			SkuChat.recentSpoken = SkuChat.recentSpoken or {}
+			-- Nur Forever (dort lief dieselbe Zeile ueber zwei Tabs); auf anderen Clients bleibt das Verhalten unveraendert.
+			if Sku.isForever and SkuChat.recentSpoken[tFlatBody] and (tNowSpeak - SkuChat.recentSpoken[tFlatBody]) < 1.5 then
+				dprint("chatDup", "Sprachausgabe uebersprungen, gerade gesprochen", tostring(a.tab and a.tab.name))
+				tIsBareAuctionCreated = true -- unterdrueckt die Ansage unten (wie die nackte Auktionszeile); History bleibt
+			else
+				SkuChat.recentSpoken[tFlatBody] = tNowSpeak
+				if math.random(1, 20) == 1 then
+					for k, v in pairs(SkuChat.recentSpoken) do if tNowSpeak - v > 10 then SkuChat.recentSpoken[k] = nil end end
+				end
+			end
 
 			--audio output
 			if tAudio == play and not tIsBareAuctionCreated then

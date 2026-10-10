@@ -39,7 +39,11 @@ local function tDurationText(aDuration)
 end
 
 function BuffAnnounce:UNIT_AURA(aEvent, aUnit, aInfo)
-   if aUnit ~= "player" or type(aInfo) ~= "table" or aInfo.isFullUpdate then return end
+   if aUnit ~= "player" or type(aInfo) ~= "table" then return end
+   -- Im Kampf kann auch isFullUpdate "geheim" sein; ein Test darauf wirft sonst einen Fehler (Log 10.10.2026).
+   local tFull = aInfo.isFullUpdate
+   if _G.issecretvalue and issecretvalue(tFull) then return end
+   if tFull then return end
    local tAdded = aInfo.addedAuras
    if type(tAdded) ~= "table" then return end
 

@@ -264,7 +264,9 @@ local factionrealmKey = factionKey .. " - " .. realmKey
 local localeKey = GetLocale():lower()
 
 local regionTable = { "US", "KR", "EU", "TW", "CN", [72] = "US", [90] = "EU"  }
-local regionKey = regionTable[GetCurrentRegion()]
+-- Forever-Beta: GetCurrentRegion() liefert einen Wert, der nicht in der Tabelle steht -> regionKey war nil, das Verketten unten
+-- warf einen Fehler, die ganze Datei brach ab und AceDB:New blieb undefiniert (Sku ohne Datenbank, sobald Questies neuere AceDB fehlte).
+local regionKey = regionTable[(GetCurrentRegion and GetCurrentRegion()) or 0] or "EU"
 local factionrealmregionKey = factionrealmKey .. " - " .. regionKey
 
 -- Actual database initialization function
@@ -384,8 +386,9 @@ local function logoutHandler(frame, event)
 	end
 end
 
-AceDB.frame:RegisterEvent("PLAYER_LOGOUT")
-AceDB.frame:SetScript("OnEvent", logoutHandler)
+-- Forever: ein Fehler hier brach die ganze Datei ab (AceDB:New blieb undefiniert -> Sku ohne Datenbank). Deshalb abgesichert.
+pcall(AceDB.frame.RegisterEvent, AceDB.frame, "PLAYER_LOGOUT")
+pcall(AceDB.frame.SetScript, AceDB.frame, "OnEvent", logoutHandler)
 
 
 --[[-------------------------------------------------------------------------

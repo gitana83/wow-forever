@@ -95,6 +95,34 @@ local L = {
    enrollFailed   = deEn("Anmeldung fehlgeschlagen: ", "Listing failed: "),
    unenrolled     = deEn("Anmeldung zurückgezogen", "Listing removed"),
    unavailable    = deEn("Gruppen-Finder nicht verfügbar", "Group finder unavailable"),
+   -- Forever-Erweiterung (Gruppensuche wie im Blizzard-Fenster)
+   update         = deEn("Eintrag aktualisieren", "Update listing"),
+   updateStarted  = deEn("Eintrag wird aktualisiert", "Updating listing"),
+   updated        = deEn("Eintrag aktualisiert", "Listing updated"),
+   onlyLeader     = deEn("Nur der Gruppenanführer kann einen Eintrag erstellen oder ändern.", "Only the group leader can create or change a listing."),
+   tooManyAct     = deEn("Zu viele Aktivitäten gewählt, höchstens %d.", "Too many activities selected, at most %d."),
+   groupTooBig    = deEn("Deine Gruppe ist zu groß für eine der Aktivitäten, höchstens %d Spieler.", "Your group is too large for one of the activities, at most %d players."),
+   autoChoose     = deEn("Diese Kategorie verlangt einen Freitext, den nur das Blizzard-Fenster senden kann. Bitte dort anmelden.", "This category needs a free text that only the Blizzard window can send. Please post there."),
+   searchActive   = deEn("Nach meinem Eintrag suchen", "Search for my listing"),
+   searchFilter   = deEn("Gesuchte Dungeons", "Activities to search"),
+   searchAll      = deEn("alle", "all"),
+   searchFailed   = deEn("Suche fehlgeschlagen", "Search failed"),
+   ignoreLevel    = deEn("Stufenfilter ignorieren", "Ignore suggested level"),
+   details        = deEn("Einzelheiten", "Details"),
+   selfListing    = deEn("Dein eigener Eintrag", "Your own listing"),
+   soloShort      = deEn("einzelner Spieler", "solo player"),
+   levelShort     = deEn("Stufe ", "level "),
+   needs          = deEn("sucht ", "needs "),
+   fitsYou        = deEn("passt zu deiner Rolle", "fits your role"),
+   activities     = deEn("Aktivitäten", "activities"),
+   matching       = deEn("davon passend", "matching"),
+   leaderTag      = deEn("Anführer", "leader"),
+   friendsTag     = deEn("Freunde", "friends"),
+   guildTag       = deEn("Gildenmitglieder", "guild members"),
+   inviteNotPossibleGroup = deEn("Einladen nicht möglich: Das ist eine Gruppe. Flüstere dem Anführer.", "Cannot invite: this is a group. Whisper the leader."),
+   inviteNotPossibleLead  = deEn("Einladen nicht möglich: Nur Anführer oder Assistent deiner Gruppe können einladen.", "Cannot invite: only your group's leader or assistant can invite."),
+   resultCount    = deEn(" Gruppen gefunden", " groups found"),
+   delistSearch   = deEn("Eintrag zurückziehen", "Remove my listing"),
 }
 
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -163,6 +191,7 @@ local function tDB()
    if d.newPlayerFriendly == nil then d.newPlayerFriendly = false end
    if d.showAllActivities == nil then d.showAllActivities = false end
    d.comment = d.comment or ""
+   d.searchSelection = d.searchSelection or {}
    d.browseCategory = d.browseCategory or LFG_CATEGORY_DUNGEON
    d.listCategory = d.listCategory or LFG_CATEGORY_DUNGEON
    return d
@@ -193,10 +222,10 @@ local function tActivityInfo(activityID)
    local info = { id = activityID }
    info.name       = t.shortName or t.fullName or (deEn("Aktivität #", "Activity #") .. activityID)
    info.fullName   = t.fullName or t.shortName
-   info.minLevel   = (type(t.minLevelSuggestion) == "number" and t.minLevelSuggestion > 0 and t.minLevelSuggestion)
-                     or (type(t.minLevel) == "number" and t.minLevel > 0 and t.minLevel) or nil
-   info.maxLevel   = (type(t.maxLevelSuggestion) == "number" and t.maxLevelSuggestion > 0 and t.maxLevelSuggestion)
-                     or (type(t.maxLevel) == "number" and t.maxLevel > 0 and t.maxLevel) or nil
+   -- Wie Blizzards Fenster (LFGUtil_GetFilteredActivities): nur die *Suggestion*-Felder zaehlen. Frueher fiel Sku auf minLevel/maxLevel
+   -- zurueck; die tragen auf Forever echte Mindeststufen, und bei Stufe 11 blieb deshalb kein einziger Dungeon uebrig (10.10.2026).
+   info.minLevel   = (type(t.minLevelSuggestion) == "number" and t.minLevelSuggestion > 0 and t.minLevelSuggestion) or nil
+   info.maxLevel   = (type(t.maxLevelSuggestion) == "number" and t.maxLevelSuggestion > 0 and t.maxLevelSuggestion) or nil
    info.isHeroic   = t.isHeroicActivity and true or false
    info.maxPlayers = t.maxNumPlayers
    info.categoryID = t.categoryID
@@ -260,6 +289,11 @@ local function tGetCategoryActivities(categoryID)
 
    local d = tDB()
    local filterOn = not d.showAllActivities
+   -- Blizzards eigene Einstellung "Stufenfilter aus" respektieren.
+   if filterOn and _G.C_CVar and _G.C_CVar.GetCVarBool then
+      local okCv, cv = pcall(_G.C_CVar.GetCVarBool, "disableSuggestedLevelActivityFilter")
+      if okCv and cv == true then filterOn = false end
+   end
    local lvl = (_G.UnitLevel and _G.UnitLevel("player")) or 0
 
    -- Layer 1: Blizzard's recommended subset, validated against the raw list.
@@ -366,59 +400,203 @@ end
 -- Browse search (pure C_LFGList — no widget driving needed).
 ---------------------------------------------------------------------------------------------------------------------------------------
 DungeonBrowser.tSearchTime = 0
-local function tStartSearch(categoryID)
+DungeonBrowser.tSearchFailed = false
+
+-- Aktivitaets-IDs, nach denen gesucht wird. Wie Blizzards LFGBrowse_DoSearch: sind keine bestimmten Aktivitaeten gewaehlt, wird nach allem
+-- in der Kategorie gesucht (die Liste ist dort nach Stufe gefiltert, sofern der Stufenfilter an ist). Ist die gefilterte Liste leer
+-- (z. B. Stufe 11, kein Dungeon passt), nimmt die Suche alle Aktivitaeten der Kategorie, damit sie nicht ins Leere laeuft.
+local function tSearchActivityIDs(categoryID)
+   local ids, sel = {}, tDB().searchSelection or {}
+   for id, on in pairs(sel) do
+      if on == true then ids[#ids + 1] = id end
+   end
+   if #ids == 0 then
+      for _, info in ipairs(tGetCategoryActivities(categoryID)) do ids[#ids + 1] = info.id end
+   end
+   if #ids == 0 then
+      local raw = tRawActivityIDs(categoryID)
+      if type(raw) == "table" then for _, id in ipairs(raw) do ids[#ids + 1] = id end end
+   end
+   table.sort(ids)
+   return ids
+end
+
+-- Laut Forever-Doku: Search(categoryID, filter, preferredFilters, languageFilter, searchCrossFactionListings, advancedFilter,
+-- activityIDsFilter). Die alte Sku-Form (categoryID, "", 0, 0) uebergab einen Text als filter und scheiterte; es lief nur der letzte Rueckfall.
+local function tStartSearch(categoryID, activityIDs)
    if not (_G.C_LFGList and _G.C_LFGList.Search) then return end
    categoryID = categoryID or tDB().browseCategory or LFG_CATEGORY_DUNGEON
-   local ok = pcall(_G.C_LFGList.Search, categoryID, "", 0, 0)
-   if not ok then ok = pcall(_G.C_LFGList.Search, { categoryID = categoryID, filter = 0, preferredFilters = 0 }) end
-   if not ok then pcall(_G.C_LFGList.Search, categoryID) end
+   if not activityIDs then activityIDs = tSearchActivityIDs(categoryID) end
+   local tFilterIDs = (#activityIDs > 0) and activityIDs or nil
+   local ok, err = pcall(_G.C_LFGList.Search, categoryID, 0, 0, nil, false, nil, tFilterIDs)
+   local tPath = "voll"
+   if not ok then
+      tPath = "ohne Aktivitaeten"
+      ok, err = pcall(_G.C_LFGList.Search, categoryID, 0, 0)
+   end
+   if not ok then
+      tPath = "nur Kategorie"
+      ok, err = pcall(_G.C_LFGList.Search, categoryID)
+   end
    DungeonBrowser.tSearchTime = GetTime()
-   dprint("dungeonBrowser", "Search invoked", { categoryID = categoryID, ok = ok })
+   DungeonBrowser.tSearchFailed = not ok
+   dprint("dungeonBrowser", "Search invoked", { categoryID = categoryID, activities = #activityIDs, ok = ok, path = tPath, err = tostring(err or "") })
+end
+
+local function tSafeCounts(resultID)
+   if not (_G.C_LFGList and _G.C_LFGList.GetSearchResultMemberCounts) then return nil end
+   local ok, mc = pcall(_G.C_LFGList.GetSearchResultMemberCounts, resultID)
+   if ok and type(mc) == "table" then return mc end
+   return nil
+end
+
+local function tOwnRoles()
+   if _G.C_LFGListRoles and _G.C_LFGListRoles.GetRoles then
+      local ok, r = pcall(_G.C_LFGListRoles.GetRoles)
+      if ok and type(r) == "table" then return r end
+   end
+   return nil
+end
+
+local function tRoleList(aTank, aHealer, aDps)
+   local t = {}
+   if aTank then t[#t + 1] = L.roleTank end
+   if aHealer then t[#t + 1] = L.roleHealer end
+   if aDps then t[#t + 1] = L.roleDamager end
+   return t
+end
+
+-- Kann ich diese Gruppe einladen? Regel aus LFGBrowseUtil_GetInviteActionForResult: nur Einzelspieler (numMembers == 1), und nur wenn ich
+-- allein bin oder Anfuehrer/Assistent meiner Gruppe. Gruppen kann man nur anfluestern.
+local function tInviteState(aInfo)
+   if (aInfo.numMembers or 0) ~= 1 then return false, L.inviteNotPossibleGroup end
+   local inGroup = _G.IsInGroup and _G.IsInGroup()
+   if inGroup and not ((_G.UnitIsGroupLeader and _G.UnitIsGroupLeader("player")) or (_G.UnitIsGroupAssistant and _G.UnitIsGroupAssistant("player"))) then
+      return false, L.inviteNotPossibleLead
+   end
+   return true
 end
 
 local function tGetSearchResults()
    local out = {}
-   if not (_G.C_LFGList and _G.C_LFGList.GetSearchResults) then return out end
-   local r1, r2 = _G.C_LFGList.GetSearchResults()
+   if not (_G.C_LFGList and _G.C_LFGList.GetSearchResultInfo) then return out end
    local ids
-   if type(r1) == "table" then ids = r1
-   elseif type(r1) == "number" and type(r2) == "table" then ids = r2 end
+   -- Blizzard liest die Liste mit GetFilteredSearchResults (gibt gesamt, Ergebnisse zurueck); GetSearchResults als Rueckfall.
+   if _G.C_LFGList.GetFilteredSearchResults then
+      local ok, r1, r2 = pcall(_G.C_LFGList.GetFilteredSearchResults)
+      if ok then
+         if type(r2) == "table" then ids = r2 elseif type(r1) == "table" then ids = r1 end
+      end
+   end
+   if not ids and _G.C_LFGList.GetSearchResults then
+      local r1, r2 = _G.C_LFGList.GetSearchResults()
+      if type(r1) == "table" then ids = r1
+      elseif type(r1) == "number" and type(r2) == "table" then ids = r2 end
+   end
    if type(ids) ~= "table" then return out end
+
    local myName = _G.UnitName and _G.UnitName("player")
+   local active = tGetActiveEntry()
+   local activeSet = {}
+   if active and type(active.activityIDs) == "table" then
+      for _, aid in ipairs(active.activityIDs) do activeSet[aid] = true end
+   end
+   local myRoles = tOwnRoles()
+
    for _, rid in ipairs(ids) do
       local ok, info = pcall(_G.C_LFGList.GetSearchResultInfo, rid)
-      if ok and type(info) == "table" and not info.isDelisted then
+      if ok and type(info) == "table" then
          local e = {
-            resultID   = rid,
-            leaderName = info.leaderName,
-            comment    = (info.comment ~= "" and info.comment) or nil,
-            numMembers = info.numMembers,
-            age        = info.age,
-            npf        = info.newPlayerFriendly,
-            isSelf     = info.hasSelf or (myName and info.leaderName == myName) or false,
+            resultID    = rid,
+            leaderName  = info.leaderName,
+            comment     = (type(info.comment) == "string" and info.comment ~= "" and info.comment) or nil,
+            numMembers  = info.numMembers or 0,
+            age         = info.age,
+            npf         = info.newPlayerFriendly,
+            isSelf      = (info.hasSelf == true) or (myName and info.leaderName == myName) or false,
+            isDelisted  = info.isDelisted == true,
+            friends     = (info.numBNetFriends or 0) + (info.numCharFriends or 0),
+            guildmates  = info.numGuildMates or 0,
+            activityIDs = type(info.activityIDs) == "table" and info.activityIDs or {},
          }
-         local aid = (type(info.activityIDs) == "table" and info.activityIDs[1]) or info.activityID
-         if aid then
+         -- Aktivitaeten: die zu meinem eigenen Eintrag passenden zuerst (wie das Blizzard-Fenster)
+         local matching = {}
+         for _, aid in ipairs(e.activityIDs) do if activeSet[aid] then matching[#matching + 1] = aid end end
+         e.matchingCount = #matching
+         local shown = (#matching > 0) and matching or e.activityIDs
+         e.activityNames = {}
+         for _, aid in ipairs(e.activityIDs) do
             local ai = tActivityInfo(aid)
-            if ai then e.activity = ai.name; e.maxPlayers = ai.maxPlayers end
+            if ai then
+               e.activityNames[#e.activityNames + 1] = ai.name .. tLevelStr(ai)
+               if not e.maxPlayers then e.maxPlayers = ai.maxPlayers end
+            end
+         end
+         if #shown == 1 then
+            local ai = tActivityInfo(shown[1])
+            if ai then e.activity = ai.name; e.maxPlayers = ai.maxPlayers or e.maxPlayers end
+         elseif #shown > 1 then
+            e.activity = #shown .. " " .. L.activities .. ((#matching > 0) and (" (" .. L.matching .. ")") or "")
+         end
+         -- Rollen
+         local mc = tSafeCounts(rid)
+         if mc then
+            e.roleText = string.format("%s %d, %s %d, %s %d", L.roleTank, mc.TANK or 0, L.roleHealer, mc.HEALER or 0, L.roleDamager, mc.DAMAGER or 0)
+            local need = tRoleList((mc.TANK_REMAINING or 0) > 0, (mc.HEALER_REMAINING or 0) > 0, (mc.DAMAGER_REMAINING or 0) > 0)
+            if #need > 0 and e.numMembers > 1 then e.needText = L.needs .. table.concat(need, ", ") end
+            if myRoles and e.numMembers > 1 then
+               e.fits = (myRoles.tank and (mc.TANK_REMAINING or 0) > 0) or (myRoles.healer and (mc.HEALER_REMAINING or 0) > 0)
+                  or (myRoles.dps and (mc.DAMAGER_REMAINING or 0) > 0) or false
+            end
+         end
+         -- Einzelspieler: Stufe, Klasse, Rollen des Spielers
+         if e.numMembers == 1 and _G.C_LFGList.GetSearchResultPlayerInfo then
+            local okP, p = pcall(_G.C_LFGList.GetSearchResultPlayerInfo, rid, 1)
+            if okP and type(p) == "table" then
+               e.soloLevel, e.soloClass = p.level, p.className
+               if type(p.lfgRoles) == "table" then
+                  local rl = tRoleList(p.lfgRoles.tank, p.lfgRoles.healer, p.lfgRoles.dps)
+                  if #rl > 0 then e.soloRoles = table.concat(rl, "/") end
+               end
+            end
          end
          out[#out + 1] = e
       end
    end
-   table.sort(out, function(a, b) return (a.age or 0) < (b.age or 0) end)
+   -- Eigene Eintraege zuerst, dann solche, die zu meinem Eintrag passen, dann die neuesten.
+   table.sort(out, function(a, b)
+      if a.isSelf ~= b.isSelf then return a.isSelf end
+      if a.isDelisted ~= b.isDelisted then return not a.isDelisted end
+      if (a.matchingCount > 0) ~= (b.matchingCount > 0) then return a.matchingCount > 0 end
+      return (a.age or 0) < (b.age or 0)
+   end)
    return out
 end
 
 local function tBrowseLabel(e)
    local parts = {}
-   parts[#parts + 1] = e.leaderName or "?"
+   if e.isSelf then
+      parts[#parts + 1] = L.selfListing
+   else
+      parts[#parts + 1] = e.leaderName or "?"
+   end
+   if e.numMembers == 1 then
+      local solo = {}
+      if e.soloLevel then solo[#solo + 1] = L.levelShort .. e.soloLevel end
+      if e.soloClass and e.soloClass ~= "" then solo[#solo + 1] = e.soloClass end
+      if #solo > 0 then parts[#parts + 1] = table.concat(solo, " ") end
+      if e.soloRoles then parts[#parts + 1] = e.soloRoles end
+   end
    if e.activity then parts[#parts + 1] = e.activity end
-   if e.numMembers then
-      parts[#parts + 1] = e.numMembers .. (e.maxPlayers and ("/" .. e.maxPlayers) or "") .. " " .. L.members
+   if e.numMembers > 1 then
+      parts[#parts + 1] = e.numMembers .. (e.maxPlayers and e.maxPlayers > 0 and ("/" .. e.maxPlayers) or "") .. " " .. L.members
+      if e.needText then parts[#parts + 1] = e.needText end
+      if e.fits then parts[#parts + 1] = L.fitsYou end
    end
    if e.npf then parts[#parts + 1] = L.npfShort end
    if e.age then parts[#parts + 1] = math.floor(e.age / 60) .. L.ageMin end
    if e.comment then parts[#parts + 1] = e.comment end
+   if e.isDelisted then parts[#parts + 1] = "(" .. deEn("zurückgezogen", "delisted") .. ")" end
    return table.concat(parts, " — ")
 end
 
@@ -434,7 +612,17 @@ local CATEGORY_FALLBACK = {
    [118] = deEn("Spieler gegen Spieler", "Player vs player"),
    [120] = deEn("Benutzerdefiniert", "Custom"),
 }
+-- Kategorie-Daten laut Forever-Doku: C_LFGList.GetLfgCategoryInfo(id) -> { name, autoChooseActivity, ... }
+local function tCategoryInfo(id)
+   if _G.C_LFGList and _G.C_LFGList.GetLfgCategoryInfo then
+      local ok, t = pcall(_G.C_LFGList.GetLfgCategoryInfo, id)
+      if ok and type(t) == "table" then return t end
+   end
+   return nil
+end
 local function tCategoryName(id)
+   local tInfo = tCategoryInfo(id)
+   if tInfo and type(tInfo.name) == "string" and tInfo.name ~= "" then return tInfo.name end
    if _G.C_LFGList and _G.C_LFGList.GetCategoryInfo then
       local ok, a, b = pcall(_G.C_LFGList.GetCategoryInfo, id)
       if ok then
@@ -476,72 +664,111 @@ function DungeonBrowser:ToggleShowAll()
    local d = tDB(); d.showAllActivities = not d.showAllActivities
 end
 
--- Create the listing from our own selection/roles/comment (HW context via macrotext).
+-- Gewaehlte Rollen an Blizzards Rollen-Speicher uebergeben (wie LFGListingMixin:SaveSoloRoles nach dem Erstellen/Aktualisieren).
+-- Vorher wurden die Rollen nur in Skus eigener Tabelle gemerkt und nie an das Spiel gegeben.
+local function tApplyRoles()
+   if not (_G.C_LFGListRoles and _G.C_LFGListRoles.SetRoles) then return end
+   local roles = tDB().roles or {}
+   local ok, res = pcall(_G.C_LFGListRoles.SetRoles, {
+      tank   = roles.TANK == true,
+      healer = roles.HEALER == true,
+      dps    = roles.DAMAGER == true,
+   })
+   dprint("dungeonBrowser", "SetRoles", { ok = ok, result = tostring(res), tank = roles.TANK == true, healer = roles.HEALER == true, dps = roles.DAMAGER == true })
+end
+
+-- Vor dem Absenden pruefen, was Blizzards Fenster auch pruefen wuerde (LFGListingMixin:UpdatePostButtonEnableState), und den Grund
+-- sagen, statt still zu scheitern. Gibt nil zurueck, wenn alles in Ordnung ist.
+local function tCheckPostable(aIDs)
+   local inGroup = _G.IsInGroup and _G.IsInGroup()
+   if inGroup and _G.UnitIsGroupLeader and not _G.UnitIsGroupLeader("player") then return L.onlyLeader end
+   local cap = (_G.Constants and _G.Constants.LFGConstsExposed and _G.Constants.LFGConstsExposed.GROUP_FINDER_MAX_ACTIVITY_CAPACITY) or 16
+   if #aIDs > cap then return string.format(L.tooManyAct, cap) end
+   if inGroup and _G.GetNumGroupMembers then
+      local n = _G.GetNumGroupMembers() or 0
+      local minMax
+      local space = true
+      for _, id in ipairs(aIDs) do
+         local ai = tActivityInfo(id)
+         local mp = ai and ai.maxPlayers
+         if type(mp) == "number" and mp ~= 0 then
+            if mp <= n then space = false end
+            if not minMax or mp < minMax then minMax = mp end
+         end
+      end
+      if not space then return string.format(L.groupTooBig, minMax or 0) end
+   end
+   return nil
+end
+
+-- Beim Aendern eines bestehenden Eintrags die Auswahl aus dem aktiven Eintrag uebernehmen (wie LoadActiveEntry im Blizzard-Fenster).
+DungeonBrowser.tEditSeeded = false
+local function tSeedFromActive()
+   local active = tGetActiveEntry()
+   if not active then DungeonBrowser.tEditSeeded = false; return end
+   if DungeonBrowser.tEditSeeded then return end
+   DungeonBrowser.tEditSeeded = true
+   local d = tDB()
+   d.selection = {}
+   if type(active.activityIDs) == "table" then
+      for _, aid in ipairs(active.activityIDs) do d.selection[aid] = true end
+      local ai = active.activityIDs[1] and tActivityInfo(active.activityIDs[1])
+      if ai and ai.categoryID then d.listCategory = ai.categoryID end
+   end
+   d.newPlayerFriendly = active.newPlayerFriendly == true
+end
+
+-- Eintrag erstellen ODER (wenn schon angemeldet) aktualisieren. Laeuft ueber Makro-Text (Hardware-Kontext).
 function DungeonBrowser:DoEnroll()
    dprint("dungeonBrowser", "DoEnroll entered", {})
    local d = tDB()
-   local ids, primary = {}, nil
+   local ids = {}
    for id in pairs(d.selection) do
-      if d.selection[id] then
-         ids[#ids + 1] = id
-         if not primary then primary = id end
-      end
+      if d.selection[id] then ids[#ids + 1] = id end
    end
    table.sort(ids)
-   if not primary then primary = ids[1] end
-   if not primary then tSayChat(L.noSelection, "ff8800"); return end
-   if not (_G.C_LFGList and _G.C_LFGList.CreateListing) then tSayChat(L.unavailable, "ff8800"); return end
+   local listed = tIsListed()
+   if #ids == 0 then tSayChat(L.noSelection, "ff8800"); tSay(L.noSelection, true); return end
+   if not (_G.C_LFGList and _G.C_LFGList.CreateListing and _G.C_LFGList.UpdateListing) then tSayChat(L.unavailable, "ff8800"); return end
 
-   -- Minimal table, matching Blizzard's own CreateListing call (Blizzard_LFGVanilla_
-   -- Listing.lua: { activityIDs, newPlayerFriendly }). Roles are passed too so the
-   -- server stores them. No playstyle / bogus fields.
-   local roles = d.roles or {}
-   local listingTable = {
-      activityID   = primary,
-      activityIDs  = ids,
-      itemLevel    = 0,
-      honorLevel   = 0,
-      autoAccept   = false,
-      privateGroup = false,
-      comment      = d.comment or "",
-      newPlayerFriendly = d.newPlayerFriendly and true or false,
-      tank    = roles.TANK   == true,
-      healer  = roles.HEALER == true,
-      damager = roles.DAMAGER == true,
-      damage  = roles.DAMAGER == true,
-   }
-   local ok, err = pcall(_G.C_LFGList.CreateListing, listingTable)
-   if not ok then
-      -- fallback: older numeric signature
-      ok, err = pcall(_G.C_LFGList.CreateListing, primary, 0, 0, false, false)
-   end
-   dprint("dungeonBrowser", "CreateListing", { primary = primary, count = #ids, ok = ok, err = tostring(err or "") })
-   if ok then
-      tSayChat(L.enrollStarted)
-      -- Detect the actual outcome. CreateListing returns nothing meaningful; the
-      -- listing only becomes active after the server confirms (LFG_LIST_ACTIVE_
-      -- ENTRY_UPDATE also rebuilds us). Check twice, then announce the real result
-      -- so "started" is never mistaken for "listed".
-      if _G.C_Timer and _G.C_Timer.After then
-         local announced = false
-         local function check(final)
-            if announced then return end
-            local listed = tIsListed()
-            dprint("dungeonBrowser", "enroll check", { listed = listed and 1 or 0, final = final and 1 or 0 })
-            if listed then
-               announced = true
-               pcall(function() DungeonBrowser:Rebuild() end)
-               tSay(L.statusListed, true)
-            elseif final then
-               announced = true
-               tSayChat(L.enrollFailed .. "kein aktiver Eintrag", "ff8800")
-            end
+   -- Kategorien mit Freitext-Pflicht (Benutzerdefiniert, Quests): der Kommentar steckt in einem gesicherten Eingabefeld des
+   -- Blizzard-Fensters und kann von AddOns nicht gesetzt werden.
+   local catInfo = tCategoryInfo(d.listCategory or LFG_CATEGORY_DUNGEON)
+   if catInfo and catInfo.autoChooseActivity then tSayChat(L.autoChoose, "ff8800"); tSay(L.autoChoose, true); return end
+
+   local why = tCheckPostable(ids)
+   if why then tSayChat(why, "ff8800"); tSay(why, true); return end
+
+   -- Genau die Felder, die Blizzards eigenes Fenster sendet (LFGListingMixin:CreateOrUpdateListing): activityIDs, newPlayerFriendly.
+   local data = { activityIDs = ids, newPlayerFriendly = d.newPlayerFriendly and true or false }
+   local fn = listed and _G.C_LFGList.UpdateListing or _G.C_LFGList.CreateListing
+   local ok, res = pcall(fn, data)
+   dprint("dungeonBrowser", listed and "UpdateListing" or "CreateListing", { count = #ids, ok = ok, result = tostring(res) })
+   if not ok then tSayChat(L.enrollFailed .. tostring(res), "ff8800"); return end
+   if res == false then tSayChat(L.enrollFailed .. deEn("abgelehnt", "rejected"), "ff8800"); tSay(L.enrollFailed .. deEn("abgelehnt", "rejected"), true); return end
+   tApplyRoles()
+   tSayChat(listed and L.updateStarted or L.enrollStarted)
+
+   -- Ergebnis pruefen und das wirkliche Ergebnis ansagen ("gestartet" ist noch nicht "angemeldet").
+   if _G.C_Timer and _G.C_Timer.After then
+      local announced = false
+      local function check(final)
+         if announced then return end
+         local nowListed = tIsListed()
+         dprint("dungeonBrowser", "enroll check", { listed = nowListed and 1 or 0, final = final and 1 or 0 })
+         if nowListed then
+            announced = true
+            DungeonBrowser.tEditSeeded = false
+            pcall(function() DungeonBrowser:Rebuild() end)
+            tSay(listed and L.updated or L.statusListed, true)
+         elseif final then
+            announced = true
+            tSayChat(L.enrollFailed .. deEn("kein aktiver Eintrag", "no active listing"), "ff8800")
+            tSay(L.enrollFailed .. deEn("kein aktiver Eintrag", "no active listing"), true)
          end
-         _G.C_Timer.After(0.7, function() check(false) end)
-         _G.C_Timer.After(1.8, function() check(true) end)
       end
-   else
-      tSayChat(L.enrollFailed .. tostring(err), "ff8800")
+      _G.C_Timer.After(0.7, function() check(false) end)
+      _G.C_Timer.After(1.8, function() check(true) end)
    end
 end
 
@@ -550,12 +777,22 @@ function DungeonBrowser:DoUnenroll()
    local ok, err = pcall(_G.C_LFGList.RemoveListing)
    dprint("dungeonBrowser", "RemoveListing", { ok = ok, err = tostring(err or "") })
    if ok then
-      tSay(L.unenrolled)
+      DungeonBrowser.tEditSeeded = false
       if _G.C_Timer and _G.C_Timer.After then
+         -- Wirklich weg? Erst dann "zurueckgezogen" sagen.
          _G.C_Timer.After(0.7, function()
-            if not tIsListed() then pcall(function() DungeonBrowser:Rebuild() end) end
+            if not tIsListed() then
+               pcall(function() DungeonBrowser:Rebuild() end)
+               tSay(L.unenrolled, true)
+            else
+               tSay(deEn("Eintrag besteht noch", "Listing still active"), true)
+            end
          end)
+      else
+         tSay(L.unenrolled)
       end
+   else
+      tSayChat(L.enrollFailed .. tostring(err), "ff8800")
    end
 end
 
@@ -566,10 +803,8 @@ function DungeonBrowser:InviteLeader(name)
    tSayChat(name .. L.invited, "00ff00")
 end
 
--- Browse search. C_LFGList.Search is protected on the Vanilla-style LFG build
--- (Blizzard_LFGVanilla_Browse) — it must run from hardware/secure context, so
--- this is a macrotext target (same as CreateListing). Never call Search from
--- plain Lua (menu-build / timers / events) or it taints the search path.
+-- Gruppensuche. C_LFGList.Search ist eingeschraenkt (Forever-Doku: HasRestrictions) und laeuft deshalb nur ueber das Makro hinter
+-- "Aktualisieren", nie beim Navigieren oder aus Timern.
 function DungeonBrowser:DoSearch()
    tStartSearch(tDB().browseCategory)
    if not (_G.C_Timer and _G.C_Timer.After) then return end
@@ -578,6 +813,23 @@ function DungeonBrowser:DoSearch()
       local cmp = SkuOptions.currentMenuPosition
       if cmp.OnUpdate then pcall(function() cmp:OnUpdate() end) end
    end)
+end
+
+-- Wie LFGBrowseMixin:SearchActiveEntry: nach den Aktivitaeten des eigenen Eintrags suchen.
+function DungeonBrowser:DoSearchActive()
+   local active = tGetActiveEntry()
+   if not active or type(active.activityIDs) ~= "table" then tSay(L.statusNotListed, true); return end
+   local d = tDB()
+   d.searchSelection = {}
+   for _, aid in ipairs(active.activityIDs) do d.searchSelection[aid] = true end
+   local ai = active.activityIDs[1] and tActivityInfo(active.activityIDs[1])
+   if ai and ai.categoryID then d.browseCategory = ai.categoryID end
+   DungeonBrowser:DoSearch()
+end
+
+-- Suche fehlgeschlagen? Vom Ereignis LFG_LIST_SEARCH_FAILED gesetzt.
+function DungeonBrowser:NoteSearchFailed()
+   DungeonBrowser.tSearchFailed = true
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -665,53 +917,127 @@ function SkuCoreDungeonToggleShowAll()
    tNavCreate()
 end
 
+-- Stufenfilter an Blizzards Einstellung koppeln ("Vorgeschlagene Stufe ignorieren", CVar disableSuggestedLevelActivityFilter):
+-- eine Quelle fuer Fenster und Menue, kein getrennter Schalter.
+local function tIgnoreLevelOn()
+   if _G.C_CVar and _G.C_CVar.GetCVarBool then
+      local ok, v = pcall(_G.C_CVar.GetCVarBool, "disableSuggestedLevelActivityFilter")
+      if ok then return v == true end
+   end
+   return tDB().showAllActivities == true
+end
+
+function SkuCoreDungeonToggleIgnoreLevel()
+   local newVal = not tIgnoreLevelOn()
+   tDB().showAllActivities = newVal
+   if _G.C_CVar and _G.C_CVar.SetCVar then pcall(_G.C_CVar.SetCVar, "disableSuggestedLevelActivityFilter", newVal and "1" or "0") end
+   tSay(L.ignoreLevel .. (tIgnoreLevelOn() and L.active or ""), true)
+   DungeonBrowser:Rebuild()
+end
+
+-- Suchfilter: einzelne Aktivitaeten fuer die Gruppensuche an-/abwaehlen (leer = alles in der Kategorie).
+DungeonBrowser.tSearchEntries = DungeonBrowser.tSearchEntries or {}
+function SkuCoreDungeonToggleSearchActivity(activityID)
+   local d = tDB()
+   if d.searchSelection[activityID] then d.searchSelection[activityID] = nil else d.searchSelection[activityID] = true end
+   local ref = DungeonBrowser.tSearchEntries[activityID]
+   if ref and ref.entry then
+      local lbl = tSelMark(d.searchSelection[activityID] == true) .. ref.baseLabel
+      ref.entry.name = lbl; ref.entry.textFirstLine = lbl
+      tPin(ref.entry, lbl)
+   end
+end
+
+function SkuCoreDungeonClearSearchActivities()
+   tDB().searchSelection = {}
+   for _, ref in pairs(DungeonBrowser.tSearchEntries) do
+      if ref.entry then ref.entry.name = ref.baseLabel; ref.entry.textFirstLine = ref.baseLabel end
+   end
+   tSay(L.searchAll, true)
+end
+
+local function tSearchSelectionCount()
+   local n = 0
+   for _, on in pairs(tDB().searchSelection or {}) do if on == true then n = n + 1 end end
+   return n
+end
+
 local function tBuildCreateTab(aParent)
    DungeonBrowser.tDungeonEntries = {}
    DungeonBrowser.tRoleEntries = {}
    DungeonBrowser.tNpfEntry = nil
 
-   if tIsListed() then
+   local listed = tIsListed()
+   local d = tDB()
+
+   -- Rollen einmal aus Blizzards gespeicherter Auswahl uebernehmen (Wer zuletzt im Fenster Tank/Heiler/Schaden gewaehlt hat).
+   if not DungeonBrowser.tRolesSeeded then
+      DungeonBrowser.tRolesSeeded = true
+      local br = tOwnRoles()
+      if br and (br.tank or br.healer or br.dps) then
+         d.roles = {}
+         if br.tank then d.roles.TANK = true end
+         if br.healer then d.roles.HEALER = true end
+         if br.dps then d.roles.DAMAGER = true end
+      end
+   end
+
+   -- Bestehender Eintrag: Auswahl aus ihm laden, damit "Eintrag aktualisieren" genau das aendert, was man aendert.
+   if listed then tSeedFromActive() else DungeonBrowser.tEditSeeded = false end
+
+   if listed then
       local active = tGetActiveEntry() or {}
-      local d = tDB()
       local roleLabels = {}
       if d.roles.TANK then roleLabels[#roleLabels + 1] = ROLE_NAMES.TANK end
       if d.roles.HEALER then roleLabels[#roleLabels + 1] = ROLE_NAMES.HEALER end
       if d.roles.DAMAGER then roleLabels[#roleLabels + 1] = ROLE_NAMES.DAMAGER end
       local st = L.statusListed
-      if #roleLabels > 0 then st = st .. ": " .. table.concat(roleLabels, ", ") end
-      if active.title and active.title ~= "" then st = st .. " — " .. active.title end
+      local names = {}
+      if type(active.activityIDs) == "table" then
+         for _, aid in ipairs(active.activityIDs) do
+            local ai = tActivityInfo(aid)
+            if ai then names[#names + 1] = ai.name end
+         end
+      end
+      if #names > 0 then st = st .. ": " .. table.concat(names, ", ") end
+      if #roleLabels > 0 then st = st .. " — " .. table.concat(roleLabels, ", ") end
       local tStatus = Inject(aParent, st); tStatus.dynamic = false
+   end
 
-      -- macrotext only: RemoveListing is protected (needs HW context). An OnAction
-      -- fallback would run in insecure context and throw ADDON_ACTION_BLOCKED.
-      local tUn = Inject(aParent, L.unenroll)
-      tUn.macrotext = "/run SkuCore.DungeonBrowser:DoUnenroll()"
+   -- Hinweis, warum man gerade nichts erstellen/aendern kann.
+   if _G.IsInGroup and _G.IsInGroup() and _G.UnitIsGroupLeader and not _G.UnitIsGroupLeader("player") then
+      local tNote = Inject(aParent, L.onlyLeader); tNote.dynamic = false
+   end
+
+   -- Kategorie (aendert die Aktivitaeten darunter; bei bestehendem Eintrag steht sie fest)
+   if not listed then
+      local cats = tListCategories()
+      local tCat = Inject(aParent, L.category)
+      tCat.dynamic = true; tCat.isSelect = true; tCat.noStepUpAfterSelect = true
+      tCat.GetCurrentValue = function() return tCategoryName(tDB().listCategory) end
+      tCat.OnAction = function(self, aValue, aSelName)
+         for _, c in ipairs(cats) do
+            if c.name == aSelName then
+               tDB().listCategory = c.id
+               tSay(c.name, true)
+               tNavCreate()
+               return
+            end
+         end
+      end
+      tCat.BuildChildren = function(self)
+         for _, c in ipairs(cats) do Inject(self, c.name) end
+      end
+   end
+
+   local catInfo = tCategoryInfo(d.listCategory or LFG_CATEGORY_DUNGEON)
+   if catInfo and catInfo.autoChooseActivity then
+      -- Benutzerdefiniert/Quests: reiner Freitext, nur im Blizzard-Fenster moeglich.
+      local tNote = Inject(aParent, L.autoChoose); tNote.dynamic = false
       return
    end
 
-   local d = tDB()
-
-   -- Kategorie (same category system as Gruppensuche; changing it rebuilds the
-   -- activity groups below). Read-only enumeration APIs, so no macrotext needed.
-   local cats = tListCategories()
-   local tCat = Inject(aParent, L.category)
-   tCat.dynamic = true; tCat.isSelect = true; tCat.noStepUpAfterSelect = true
-   tCat.GetCurrentValue = function() return tCategoryName(tDB().listCategory) end
-   tCat.OnAction = function(self, aValue, aSelName)
-      for _, c in ipairs(cats) do
-         if c.name == aSelName then
-            tDB().listCategory = c.id
-            tSay(c.name, true)
-            tNavCreate()
-            return
-         end
-      end
-   end
-   tCat.BuildChildren = function(self)
-      for _, c in ipairs(cats) do Inject(self, c.name) end
-   end
-
-   -- Rolle (multi-select toggles, class-filtered)
+   -- Rolle (Mehrfachauswahl, nach Klasse gefiltert)
    local _, classToken = UnitClass("player")
    local availableRoles = CLASS_ROLES[classToken or ""] or { "DAMAGER" }
    local tRole = Inject(aParent, L.role)
@@ -728,7 +1054,7 @@ local function tBuildCreateTab(aParent)
       end
    end
 
-   -- Anfängerfreundlich (toggle)
+   -- Anfaengerfreundlich (Schalter)
    do
       local checked = d.newPlayerFriendly == true
       local e = Inject(aParent, L.npf .. (checked and L.active or ""))
@@ -736,39 +1062,18 @@ local function tBuildCreateTab(aParent)
       e.macrotext = "/run SkuCoreDungeonToggleNPF()"
    end
 
-   -- Kommentar (text field)
-   do
-      local lbl = L.comment .. (d.comment ~= "" and (": " .. d.comment) or "")
-      local e = Inject(aParent, lbl)
-      e.OnAction = function(self)
-         if not (SkuOptions and SkuOptions.EditBoxShow) then return end
-         PlaySound(88)
-         tSay(L.commentPrompt)
-         SkuOptions:EditBoxShow(tDB().comment or "", function()
-            PlaySound(89)
-            local txt = strtrim(SkuOptionsEditBoxEditBox:GetText() or "")
-            tDB().comment = txt
-            local nl = L.comment .. (txt ~= "" and (": " .. txt) or "")
-            self.name = nl; self.textFirstLine = nl
-            tPin(self, nl)
-         end)
-      end
-   end
-
-   -- Aktivitäten der gewählten Kategorie, als Untermenüs pro Aktivitätsgruppe
-   -- (z. B. "Heroic Dungeons" / "Dungeons"). Built BEFORE the filter toggle is
-   -- injected so the toggle can announce how many entries it is hiding.
+   -- Aktivitaeten der gewaehlten Kategorie, als Untermenues pro Aktivitaetsgruppe. Vor dem Stufenfilter gebaut, damit dieser sagen
+   -- kann, wie viele Eintraege er ausblendet.
    local groups = tGetActivityGroups(d.listCategory or LFG_CATEGORY_DUNGEON)
    local stats = DungeonBrowser.tFilterStats or {}
 
-   -- Stufenfilter (an = nur was zur eigenen Stufe passt, wie im sichtbaren Fenster)
    do
-      local on = not d.showAllActivities
+      local on = not tIgnoreLevelOn()
       local lbl = L.levelFilter .. (on and L.active or "")
       local hidden = (stats.total or 0) - (stats.shown or 0)
       if on and hidden > 0 then lbl = lbl .. ", " .. hidden .. L.hiddenCount end
       local e = Inject(aParent, lbl)
-      e.macrotext = "/run SkuCoreDungeonToggleShowAll()"
+      e.macrotext = "/run SkuCoreDungeonToggleIgnoreLevel()"
    end
 
    if #groups == 0 then
@@ -795,10 +1100,14 @@ local function tBuildCreateTab(aParent)
    local tDes = Inject(aParent, L.deselectAll)
    tDes.macrotext = "/run SkuCoreDungeonDeselectAll()"
 
-   -- macrotext only: CreateListing is protected (needs HW context). An OnAction
-   -- fallback would run insecure and throw ADDON_ACTION_BLOCKED.
-   local tEnroll = Inject(aParent, L.enroll)
+   -- Nur Makro-Text: CreateListing/UpdateListing sind eingeschraenkt (Hardware-Kontext). Ein OnAction-Ersatz liefe unsicher.
+   local tEnroll = Inject(aParent, listed and L.update or L.enroll)
    tEnroll.macrotext = "/run SkuCore.DungeonBrowser:DoEnroll()"
+
+   if listed then
+      local tUn = Inject(aParent, L.unenroll)
+      tUn.macrotext = "/run SkuCore.DungeonBrowser:DoUnenroll()"
+   end
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -806,6 +1115,7 @@ end
 ---------------------------------------------------------------------------------------------------------------------------------------
 local function tBuildBrowseTab(aParent)
    local d = tDB()
+   local listed = tIsListed()
 
    -- Kategorie (select)
    local cats = tListCategories()
@@ -815,10 +1125,10 @@ local function tBuildBrowseTab(aParent)
    tCat.noStepUpAfterSelect = true
    tCat.GetCurrentValue = function() return tCategoryName(tDB().browseCategory) end
    tCat.OnAction = function(self, aValue, aSelName)
-      -- Only set the category here; the actual C_LFGList.Search is protected and
-      -- must run via the "Aktualisieren" macrotext (HW context), not from here.
+      -- Nur die Kategorie merken; die Suche selbst laeuft ueber "Aktualisieren" (eingeschraenkte Funktion).
       for _, c in ipairs(cats) do
          if c.name == aSelName then
+            if tDB().browseCategory ~= c.id then tDB().searchSelection = {} end
             tDB().browseCategory = c.id
             tSay(c.name, true)
             return
@@ -829,31 +1139,109 @@ local function tBuildBrowseTab(aParent)
       for _, c in ipairs(cats) do Inject(self, c.name) end
    end
 
-   -- Aktualisieren — C_LFGList.Search is protected, so drive it via macrotext
-   -- (hardware/secure context), same as CreateListing. DoSearch schedules the
-   -- results rebuild.
+   -- Gesuchte Aktivitaeten (wie das Aktivitaets-Aufklappfeld im Blizzard-Fenster)
+   do
+      local n = tSearchSelectionCount()
+      local lbl = L.searchFilter .. ": " .. (n > 0 and tostring(n) or L.searchAll)
+      local tFilter = Inject(aParent, lbl)
+      tFilter.dynamic = true; tFilter.sorting = true
+      tFilter.BuildChildren = function(self)
+         DungeonBrowser.tSearchEntries = {}
+         local tClear = Inject(self, L.searchAll)
+         tClear.macrotext = "/run SkuCoreDungeonClearSearchActivities()"
+         for _, grp in ipairs(tGetActivityGroups(tDB().browseCategory or LFG_CATEGORY_DUNGEON)) do
+            for _, info in ipairs(grp.activities) do
+               local base = info.name .. tLevelStr(info)
+               local checked = tDB().searchSelection[info.id] == true
+               local e = Inject(self, tSelMark(checked) .. base)
+               DungeonBrowser.tSearchEntries[info.id] = { entry = e, baseLabel = base }
+               e.macrotext = "/run SkuCoreDungeonToggleSearchActivity(" .. tostring(info.id) .. ")"
+            end
+         end
+      end
+   end
+
+   -- Aktualisieren: C_LFGList.Search ist eingeschraenkt, deshalb Makro-Text (Hardware-Kontext). DoSearch plant den Neuaufbau.
    local tRefresh = Inject(aParent, L.refresh)
    tRefresh.macrotext = "/run SkuCore.DungeonBrowser:DoSearch()"
+
+   if listed then
+      local tMine = Inject(aParent, L.searchActive)
+      tMine.macrotext = "/run SkuCore.DungeonBrowser:DoSearchActive()"
+      local tUn = Inject(aParent, L.delistSearch)
+      tUn.macrotext = "/run SkuCore.DungeonBrowser:DoUnenroll()"
+   end
+
+   do
+      local on = tIgnoreLevelOn()
+      local e = Inject(aParent, L.ignoreLevel .. (on and L.active or ""))
+      e.macrotext = "/run SkuCoreDungeonToggleIgnoreLevel()"
+   end
 
    -- Ergebnisse
    local results = tGetSearchResults()
    if #results == 0 then
-      local lbl = (GetTime() - (DungeonBrowser.tSearchTime or 0) < 3) and L.searching or L.noGroups
+      local lbl = L.noGroups
+      if DungeonBrowser.tSearchFailed then
+         lbl = L.searchFailed
+      elseif GetTime() - (DungeonBrowser.tSearchTime or 0) < 3 then
+         lbl = L.searching
+      end
       local tNone = Inject(aParent, lbl); tNone.dynamic = false
    else
+      local tCount = Inject(aParent, #results .. L.resultCount); tCount.dynamic = false
       for _, e in ipairs(results) do
          local ep = Inject(aParent, tBrowseLabel(e))
          ep.dynamic = true; ep.sorting = true
          local lName = e.leaderName or ""
+         local lRes = e
          ep.BuildChildren = function(self)
-            if lName ~= "" then
-               local tInv = Inject(self, L.invite)
-               tInv.macrotext = "/run SkuCore.DungeonBrowser:InviteLeader(\"" .. lName .. "\")"
+            -- Einladen nur, wenn es laut Blizzard-Regel geht; sonst der Grund als Text
+            if lName ~= "" and not lRes.isSelf then
+               local canInvite, why = tInviteState(lRes)
+               if canInvite then
+                  local tInv = Inject(self, L.invite)
+                  tInv.macrotext = "/run SkuCore.DungeonBrowser:InviteLeader(\"" .. lName .. "\")"
+               else
+                  local tWhy = Inject(self, why); tWhy.dynamic = false
+               end
                local tW = Inject(self, L.whisper)
                tW.OnAction = function()
-                  -- ChatFrame_OpenChat is a deprecated alias (nil with loadDeprecationFallbacks off).
+                  -- ChatFrame_OpenChat ist ein veralteter Alias (nil ohne loadDeprecationFallbacks).
                   local tOpen = (_G.ChatFrameUtil and ChatFrameUtil.OpenChat) or _G.ChatFrame_OpenChat
                   if tOpen then tOpen("/w " .. lName .. " ") end
+               end
+            end
+            if lRes.isSelf then
+               local tUn = Inject(self, L.delistSearch)
+               tUn.macrotext = "/run SkuCore.DungeonBrowser:DoUnenroll()"
+            end
+            -- Einzelheiten: nur lesen
+            local tDet = Inject(self, L.details)
+            tDet.dynamic = true; tDet.sorting = true
+            tDet.BuildChildren = function(self2)
+               local function line(text) local t = Inject(self2, text); t.dynamic = false end
+               for _, an in ipairs(lRes.activityNames or {}) do line(an) end
+               if lRes.roleText then line(lRes.roleText) end
+               if lRes.needText then line(lRes.needText) end
+               if lRes.comment then line(L.comment .. ": " .. lRes.comment) end
+               if lRes.friends and lRes.friends > 0 then line(L.friendsTag .. ": " .. lRes.friends) end
+               if lRes.guildmates and lRes.guildmates > 0 then line(L.guildTag .. ": " .. lRes.guildmates) end
+               if _G.C_LFGList and _G.C_LFGList.GetSearchResultPlayerInfo then
+                  for i = 1, math.min(lRes.numMembers or 0, 40) do
+                     local ok, p = pcall(_G.C_LFGList.GetSearchResultPlayerInfo, lRes.resultID, i)
+                     if ok and type(p) == "table" and p.name then
+                        local bits = { p.name }
+                        if p.level then bits[#bits + 1] = L.levelShort .. p.level end
+                        if p.className and p.className ~= "" then bits[#bits + 1] = p.className end
+                        if type(p.lfgRoles) == "table" then
+                           local rl = tRoleList(p.lfgRoles.tank, p.lfgRoles.healer, p.lfgRoles.dps)
+                           if #rl > 0 then bits[#bits + 1] = table.concat(rl, "/") end
+                        end
+                        if p.isLeader then bits[#bits + 1] = L.leaderTag end
+                        line(table.concat(bits, ", "))
+                     end
+                  end
                end
             end
          end
@@ -1162,6 +1550,7 @@ local function tHookLFGEvents()
       tLFGEventsFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
       tLFGEventsFrame:RegisterEvent("LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED")
       tLFGEventsFrame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
+      pcall(tLFGEventsFrame.RegisterEvent, tLFGEventsFrame, "LFG_LIST_SEARCH_FAILED")
       return
    end
    local f = CreateFrame("Frame")
@@ -1169,11 +1558,20 @@ local function tHookLFGEvents()
    f:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
    f:RegisterEvent("LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED")
    f:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
+   pcall(f.RegisterEvent, f, "LFG_LIST_SEARCH_FAILED") -- nicht jeder Client kennt das Ereignis
    f:SetScript("OnEvent", function(self, event)
       if not DungeonBrowser:IsEnabled() then return end
       if event == "LFG_LIST_ACTIVE_ENTRY_UPDATE" then
+         if not tIsListed() then DungeonBrowser.tEditSeeded = false end
          if SkuOptions and SkuOptions:IsMenuOpen() then pcall(function() DungeonBrowser:Rebuild() end) end
          return
+      end
+      if event == "LFG_LIST_SEARCH_FAILED" then
+         DungeonBrowser.tSearchFailed = true
+         dprint("dungeonBrowser", "LFG_LIST_SEARCH_FAILED")
+         if SkuOptions and SkuOptions:IsMenuOpen() and tCursorInBrowser() then tSay(L.searchFailed, true) end
+      elseif event == "LFG_LIST_SEARCH_RESULTS_RECEIVED" then
+         DungeonBrowser.tSearchFailed = false
       end
       -- results / activity list updated: refresh the current node in place if open
       if SkuOptions and SkuOptions:IsMenuOpen() and SkuOptions.currentMenuPosition
@@ -1234,5 +1632,6 @@ function DungeonBrowser:OnDisable()
       tLFGEventsFrame:UnregisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
       tLFGEventsFrame:UnregisterEvent("LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED")
       tLFGEventsFrame:UnregisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
+      pcall(tLFGEventsFrame.UnregisterEvent, tLFGEventsFrame, "LFG_LIST_SEARCH_FAILED")
    end
 end

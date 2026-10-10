@@ -1274,7 +1274,7 @@ local function CreateRtWpSubmenu(aParent, aGroups, aQuestID)
 
 	local tPlayX, tPlayY = UnitPosition("player")
 	local tRoutesInRange = SkuNav:GetAllLinkedWPsInRangeToCoords(tPlayX, tPlayY, SkuNav.MaxMetaEntryRange)--SkuOptions.db.profile["SkuNav"].nearbyWpRange)
-	
+
 	local tHasContent = false
 	for unitGeneralName, wpTable in pairs(tResultWPs) do
 		--dprint(unitGeneralName, wpTable)
