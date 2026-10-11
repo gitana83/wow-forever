@@ -425,7 +425,10 @@ local function tGetPlateTex(np)
 	if not np.SkuVAColor then
 		local ok, tex = pcall(function() return np:CreateTexture(nil, "BACKGROUND") end)
 		if not ok or not tex then return nil end
-		tex:SetPoint("CENTER", np, "CENTER", 0, 0)
+		local okP, errP = pcall(tex.SetPoint, tex, "CENTER", np, "CENTER", 0, 0)
+		if not okP then return nil end
+		-- Farbflaeche behaelt ihre Deckkraft, auch wenn die Plakette selbst abgeblendet wird (Spur: Alpha 0.01 bei Nebenzielen)
+		if tex.SetIgnoreParentAlpha then pcall(tex.SetIgnoreParentAlpha, tex, true) end
 		np.SkuVAColor = tex
 	end
 	return np.SkuVAColor
@@ -437,37 +440,60 @@ function VisualAids:VisualAidsColorClearPlate(aUnit)
 	if ok and np and np.SkuVAColor then np.SkuVAColor:Hide() end
 end
 
+local function tIsSecret(aValue)
+	return Sku.IsSecret(aValue)
+end
+
 function VisualAids:VisualAidsColorOnePlate(aUnit)
 	if not VisualAids:IsEnabled() then return end
 	local va = tEnsureVA(); if not va or va.plateColors.enabled ~= true then return end
 	if not aUnit or not C_NamePlate then return end
 	local ok, np = pcall(C_NamePlate.GetNamePlateForUnit, aUnit)
-	if not ok or not np then return end
-	local tex = tGetPlateTex(np)
-	if not tex then return end
+	if not ok or not np then
+		-- gesperrte Plakette (Forever: Gegner-Plaketten koennen fuer Addons verboten sein) mit includeForbidden nochmal versuchen
+		ok, np = pcall(C_NamePlate.GetNamePlateForUnit, aUnit, true)
+		if not ok or not np then return end
+	end
+	local tOkTex, tex = pcall(tGetPlateTex, np)
+	if not tOkTex or not tex then return end
 
-	if va.plateColors.mode == "target" and UnitIsUnit(aUnit, "target") ~= true then
-		tex:Hide()
-		return
+	if va.plateColors.mode == "target" then
+		local tOkU, tIsTarget = pcall(UnitIsUnit, aUnit, "target")
+		if tOkU and not tIsSecret(tIsTarget) and tIsTarget ~= true then
+			tex:Hide()
+			return
+		end
 	end
 
-	local r = UnitReaction("player", aUnit)
 	local key
-	if not r then
-		key = va.plateColors.colorNeutral
-	elseif r <= 3 then
-		key = va.plateColors.colorEnemy
-	elseif r == 4 then
-		key = va.plateColors.colorNeutral
+	local tOkR, r = pcall(UnitReaction, "player", aUnit)
+	if tOkR and not tIsSecret(r) then
+		if not r then
+			key = va.plateColors.colorNeutral
+		elseif r <= 3 then
+			key = va.plateColors.colorEnemy
+		elseif r == 4 then
+			key = va.plateColors.colorNeutral
+		else
+			key = va.plateColors.colorFriend
+		end
 	else
-		key = va.plateColors.colorFriend
+		-- Reaktion nicht lesbar: angreifbar = Gegner, sonst Freund
+		local tOkA, tCanAttack = pcall(UnitCanAttack, "player", aUnit)
+		if tOkA and not tIsSecret(tCanAttack) then
+			key = tCanAttack and va.plateColors.colorEnemy or va.plateColors.colorFriend
+		else
+			key = va.plateColors.colorNeutral
+		end
 	end
 	local c = tPalette[key] or tPalette.white
 	local size = tonumber(va.plateColors.size) or 40
 	local a = (tonumber(va.plateColors.alpha) or 4) / 5 * 0.7
-	tex:SetSize(size, size)
-	tex:SetColorTexture(c[1], c[2], c[3], a)
-	tex:Show()
+	pcall(function()
+		tex:SetSize(size, size)
+		tex:SetColorTexture(c[1], c[2], c[3], a)
+		tex:Show()
+	end)
 end
 
 function VisualAids:VisualAidsColorRefreshAll()
@@ -939,7 +965,8 @@ local function tNextEnemyPlateSeen(aEvent, aUnit, aWantRange)
 	if not UnitCanAttack("player", aUnit) then return end
 	if UnitIsDead(aUnit) then return end
 	local tName = UnitName(aUnit)
-	if not tName or tName == "" then return end
+	-- Forever: in Instanzen ist der Name fremder Einheiten "geheim" (Vergleich/Tabellenschluessel wirft) -> nicht merken.
+	if not tName or Sku.IsSecret(tName) or tName == "" then return end
 	local tRange
 	if aWantRange then
 		pcall(function()

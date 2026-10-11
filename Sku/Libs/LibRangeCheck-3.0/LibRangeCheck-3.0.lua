@@ -4094,7 +4094,7 @@ local function getCachedRange(unit, noItems, maxCacheAge)
   -- compose cache key out of unit guid and noItems
   local guid = UnitGUID(unit)
   -- unfortunately, caching on GUID is not possible due to secrets, using unit instead
-  local cacheKey = (isMidnight and issecretvalue(guid) and unit or guid) .. (noItems and "-1" or "-0")
+  local cacheKey = ((_G.issecretvalue and issecretvalue(guid) and unit) or guid or unit) .. (noItems and "-1" or "-0")
   local cacheItem = rangeCache[cacheKey] or nil
 
   local currentTime = GetTime()

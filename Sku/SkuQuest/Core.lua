@@ -657,9 +657,23 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 
 	local tRewardLines = {}
 	local tOkMoney, tMoney = pcall(GetQuestLogRewardMoney, questID)
+	-- Blizzards Questfenster (QuestInfo_ShowRewards) fragt das Gold des gewaehlten Log-Eintrags OHNE questID ab. Mit der ID kam bei Quests
+	-- mit Gegenstandsbelohnung 0 zurueck, die Goldbelohnung fehlte (Lena, 10.10.2026). Dann die Quest waehlen und ohne ID fragen.
+	if not (tOkMoney and type(tMoney) == "number" and tMoney > 0) then
+		if C_QuestLog.SetSelectedQuest then pcall(C_QuestLog.SetSelectedQuest, questID) end
+		local tOkMoney2, tMoney2 = pcall(GetQuestLogRewardMoney)
+		if tOkMoney2 and type(tMoney2) == "number" and tMoney2 > 0 then tOkMoney, tMoney = tOkMoney2, tMoney2 end
+	end
 	if tOkMoney and tMoney and tMoney > 0 then
 		local tOkCoin, tCoinText = pcall(GetCoinText, tMoney, " ")
 		table.insert(tRewardLines, tOkCoin and tCoinText or (tMoney.." Kupfer"))
+	end
+	-- Erfahrung als Belohnung: lieferte das Spiel schon immer (Log 10.10.2026: 850 fuer Quest 11), wurde aber nie vorgelesen.
+	if _G.GetQuestLogRewardXP then
+		local tOkXp, tXp = pcall(GetQuestLogRewardXP, questID)
+		if tOkXp and type(tXp) == "number" and tXp > 0 then
+			table.insert(tRewardLines, Sku.deEn("Erfahrung", "Experience", "Expérience")..": "..tXp)
+		end
 	end
 	local tOkNumRew, tNumRew = pcall(GetNumQuestLogRewards, questID)
 	if tOkNumRew and tNumRew and tNumRew > 0 then
@@ -728,6 +742,16 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 		end
 	end
 	dprint("SkuQuest GetTTSText diag rewards", questID, tOkMoney, tMoney, tOkNumRew, tNumRew, tOkNumCh, tNumCh, #tRewardLines)
+	-- [Diagnose 10.10.2026] Quests mit Auswahlgegenstand melden Gold 0: alle Wege nebeneinander festhalten.
+	do
+		local function tTry(aFn, ...) if type(aFn) ~= "function" then return "fehlt" end local ok, a = pcall(aFn, ...) return ok and tostring(a) or ("Fehler") end
+		dprint("SkuQuest GetTTSText diag gold", questID,
+			"mitID", tTry(GetQuestLogRewardMoney, questID), "ohneID", tTry(GetQuestLogRewardMoney),
+			"gewaehlt", tTry(C_QuestLog and C_QuestLog.GetSelectedQuest),
+			"zeigeBelohnung", tTry(C_QuestLog and C_QuestLog.ShouldShowQuestRewards, questID),
+			"xpMitID", tTry(GetQuestLogRewardXP, questID), "xpOhneID", tTry(GetQuestLogRewardXP),
+			"ehre", tTry(GetQuestLogRewardHonor, questID), "reqMoney", tTry(C_QuestLog and C_QuestLog.GetRequiredMoney, questID))
+	end
 	if #tRewardLines > 0 then
 		table.insert(tSections, L["Belohnungen\r\n"]..table.concat(tRewardLines, "\r\n"))
 	end

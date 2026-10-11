@@ -24,6 +24,11 @@ local function tBuildMacro()
    -- "ForceTaint_Strong" und darf mit dem geheimen Pet-Wert nicht rechnen (Fehlerlog 10.10.2026 "arithmetic on a secret number
    -- value", die Taste blieb stumm). Neuer Weg ohne eigenes Rechnen: das Begleiter-Tier anvisieren, dann sagt Blizzards eigene
    -- Ziel-Gesundheit-Ansage (Kampfansagen, "Gesundheit des Ziels") den Wert. Das Makro ist reiner Text, kein Lua.
+   -- Mit dem Namen des Begleiters (Discord-Tipp 10.10.2026: "/tar <Petname>" wirkt wie die Pet-Anvisieren-Taste); ohne Pet bleibt "pet".
+   local tName = _G.UnitName and UnitName("pet")
+   if type(tName) == "string" and tName ~= "" and tName ~= _G.UNKNOWNOBJECT and #tName < 40 and not string.find(tName, "[\r\n]") then
+      return '/targetexact ' .. tName
+   end
    return '/target pet'
 end
 
@@ -105,8 +110,13 @@ local gFrame = CreateFrame("Frame")
 gFrame:RegisterEvent("PLAYER_LOGIN")
 gFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 gFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+pcall(gFrame.RegisterUnitEvent, gFrame, "UNIT_PET", "player") -- neues/gewechseltes Pet -> Makro mit dem richtigen Namen
 gFrame:SetScript("OnEvent", function(_, aEvent)
-   if aEvent == "PLAYER_REGEN_ENABLED" and not SkuCore.petHealthRebindAfterCombat then return end
+   if aEvent == "PLAYER_REGEN_ENABLED" and not SkuCore.petHealthRebindAfterCombat and not SkuCore.petMacroDirty then return end
+   if aEvent == "UNIT_PET" then
+      if InCombatLockdown() then SkuCore.petMacroDirty = true return end
+   end
+   SkuCore.petMacroDirty = nil
    C_Timer.After(1, function()
       local tOk, tErr = pcall(SkuCore.UpdatePetHealthBinding, SkuCore)
       if not tOk then dprint("PetHealth", "Fehler", tostring(tErr)) end

@@ -63,7 +63,8 @@ if not lib then return end
 local GUIDIsPlayer = _G.C_PlayerInfo.GUIDIsPlayer
 local GetPlayerInfoByGUID = _G.GetPlayerInfoByGUID
 local GetNormalizedRealmName = _G.GetNormalizedRealmName
-local GetItemInfoInstant = _G.GetItemInfoInstant
+-- Forever: das Global fehlt, die Funktion lebt in C_Item (sonst Fehler "attempt to call a nil value" bei jedem Gearscore)
+local GetItemInfoInstant = _G.GetItemInfoInstant or (_G.C_Item and _G.C_Item.GetItemInfoInstant)
 local CanInspect = _G.CanInspect
 local CheckInteractDistance = _G.CheckInteractDistance
 local UnitIsVisible = _G.UnitIsVisible
@@ -294,6 +295,13 @@ local tCount = function(t)
   return count
 end
 
+-- Forever: LE_ITEM_QUALITY_* fehlen im Client -> "attempt to compare nil with number" bei jedem Inspect (Zeile 547, 42x seit 10.10.).
+-- Dateilokale Fallbacks mit den klassischen Qualitaetsstufen; andere Clients behalten ihre eigenen Werte.
+local LE_ITEM_QUALITY_POOR = _G.LE_ITEM_QUALITY_POOR or 0
+local LE_ITEM_QUALITY_RARE = _G.LE_ITEM_QUALITY_RARE or 3
+local LE_ITEM_QUALITY_EPIC = _G.LE_ITEM_QUALITY_EPIC or 4
+local LE_ITEM_QUALITY_HEIRLOOM = _G.LE_ITEM_QUALITY_HEIRLOOM or 7
+
 -- Forever: ITEM_QUALITY_COLORS ist beim Laden noch leer bzw. LE_ITEM_QUALITY_* fehlen -> Fehler "attempt to index field '?'", die
 -- Bibliothek brach hier ab (10.10.2026). Mit Rueckfallfarben, wo der Eintrag fehlt; andere Clients bekommen dieselben Farben wie bisher.
 local function tQualityColor(aQuality, aR, aG, aB)
@@ -460,9 +468,14 @@ lib.ItemScoreData = setmetatable({},{__index = function(cache, item)
 end})
 
 local function GetUnitSlotLink(unit, slot)
-  ScanTip:SetOwner(UIParent, "ANCHOR_NONE")
-  ScanTip:SetInventoryItem(unit, slot)
-  return GetInventoryItemLink(unit, slot) or select(2, ScanTip:GetItem())
+  local tLink = GetInventoryItemLink(unit, slot)
+  if tLink then return tLink end
+  -- Rueckfall ueber den Scan-Tooltip nur, wenn er die Methode hat (Forever: nicht immer)
+  if ScanTip.SetInventoryItem and ScanTip.GetItem then
+    ScanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    ScanTip:SetInventoryItem(unit, slot)
+    return select(2, ScanTip:GetItem())
+  end
 end
 
 local function CacheScore(guid, unit, level)

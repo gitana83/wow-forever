@@ -1347,9 +1347,9 @@ function SkuCore:ResolveFollowLeader()
 	end
 	local tName = SkuStatus.followUnitName
 	if tName and tName ~= "" then
-		for x = 1, 40 do if UnitName("raid"..x) == tName then return "raid"..x end end
-		for x = 1, 5 do if UnitName("party"..x) == tName then return "party"..x end end
-		if UnitExists("target") and UnitName("target") == tName then return "target" end
+		for x = 1, 40 do if Sku.SafeName("raid"..x) == tName then return "raid"..x end end
+		for x = 1, 5 do if Sku.SafeName("party"..x) == tName then return "party"..x end end
+		if UnitExists("target") and Sku.SafeName("target") == tName then return "target" end
 	end
 	return nil
 end
@@ -1529,10 +1529,10 @@ function SkuCore:NAME_PLATE_UNIT_ADDED(aEvent, aPlateName) --aPlateName is the u
 	-- <-- NAMEPLATE TEST
 
 	local tName = UnitName(aPlateName)
-	if not tName then return end
+	if not tName or Sku.IsSecret(tName) then return end   -- Forever/Instanz: geheime Namen kann das Tab-Verzeichnis nicht verwenden
 
 	local tReaction = UnitReaction("player", aPlateName)
-	if tReaction > 3 then --https://wowpedia.fandom.com/wiki/API_UnitReaction
+	if tReaction and not Sku.IsSecret(tReaction) and tReaction > 3 then --https://wowpedia.fandom.com/wiki/API_UnitReaction
 		table.insert(tSkuCoreNamePlateRepo, {name = tName, plate = aPlateName})
 	end	
 end
@@ -1842,7 +1842,7 @@ function SkuCore:OnEnable()
 					tLastPlayerTargetNr = 1
 				end
 				local tName = UnitName("target")
-				if tName then
+				if tName and not Sku.IsSecret(tName) then
 					if not tSkuCoreNamePlateRepo[tLastPlayerTargetNr] then
 						tLastPlayerTargetNr = 1
 					end
@@ -2067,7 +2067,9 @@ function SkuCore:OnEnable()
 			SkuStatus.falling = 0
 		end
 ]]		
-		if UnitIsAFK("player") == true then
+		local tIsAfk = UnitIsAFK("player")
+		if Sku.IsSecret(tIsAfk) then tIsAfk = false end   -- Forever/Instanz: geheimer Wahrheitswert wirft beim Vergleich
+		if tIsAfk == true then
 			if SkuStatus.afk == 0 then
 				SkuStatus.afk = GetTime()
 				SkuOptions.Voice:OutputString("male-Fallen", false, true, 0.2)
@@ -5032,7 +5034,13 @@ function SkuCore:IterateChildren(t, tab)
 
 		if t:GetName() == "GroupLootFrame1" then
 			--dprint(tab.."   ", t:GetName(), t.NeedButton, t.NeedButton:GetObjectType())
-			dtc = { t.IconFrame, t.NeedButton, t.GreedButton, t.PassButton }
+			-- Forever: die Knoepfe liegen in .LootButtonContainer (nicht direkt am Fenster); Luecken (nil) vermeiden
+			local tBtnHolder = t.LootButtonContainer or t
+			dtc = {}
+			local tCandidates = { t.IconFrame, tBtnHolder.NeedButton, tBtnHolder.GreedButton, tBtnHolder.TransmogButton, tBtnHolder.PassButton }
+			for tI = 1, 5 do
+				if tCandidates[tI] then dtc[#dtc + 1] = tCandidates[tI] end
+			end
 		end
 		
 		if t:GetName() == "StaticPopup1" then

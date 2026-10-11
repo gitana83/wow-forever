@@ -937,6 +937,11 @@ local function BttsHandOver(aText, aVoiceIndex, aIsEcho)
 	C_VoiceChat.SpeakText(aVoiceIndex - 1, tSpoken, tSpeed, tVolume)
 end
 
+-- Oeffentlich: Text mit dem Cache-Brecher versehen (fuer Sprache, die ausserhalb der Sku-Warteschlange direkt an C_VoiceChat.SpeakText geht)
+function SkuVoice:CacheBustText(aText)
+	return BttsCacheBust(aText)
+end
+
 function SkuVoice:Create()
 	local f = CreateFrame("Frame", "SkuVoiceMainFrame", UIParent)
 	f:RegisterEvent("VOICE_CHAT_TTS_PLAYBACK_FINISHED")
@@ -1074,6 +1079,11 @@ function SkuVoice:Create()
 			-- for the same utterance, and believing that one releases the next letter
 			-- before this one has made a sound. FINISHED/FAILED above still backstop.
 			local tMarkId, tMark = ...
+			if _G.issecretvalue then
+				-- Geheime Texte (Gegnername direkt per SpeakText) liefern geheime Marken: nicht vergleichen
+				if issecretvalue(tMarkId) then tMarkId = nil end
+				if issecretvalue(tMark) then tMark = nil end
+			end
 			if mClientGate.outstanding and mClientGate.id ~= nil and tMarkId == mClientGate.id then
 				-- [v43.5e] ★A bookmark is PROOF OF LIFE ONLY -- it must never open the
 				-- gate. Gating on "End" was wrong twice over, and it is what kept the

@@ -247,8 +247,11 @@ function RangeCheck:DoRangeCheck(aForceFlag)
 
    local tCheckRequired = false
    local tMaxRange, tMinRange = SkuOptions.RangeCheck:GetRange("target")
-   if tRangeCheckLastTarget ~= UnitGUID("target") then
-      tRangeCheckLastTarget = UnitGUID("target")
+   -- Forever: in Instanzen ist die GUID fremder Ziele geheim; ein Vergleich damit warf hier bei JEDER Abfrage einen Fehler (3818x in
+   -- 3 Minuten) und brach auch die Zielansage ab (SkuMob PLAYER_TARGET_CHANGED -> DoRangeCheck). Ohne lesbare GUID zaehlt nur der Bereichswechsel.
+   local tGuidNow = Sku.SafeGUID("target")
+   if tGuidNow ~= nil and tRangeCheckLastTarget ~= tGuidNow then
+      tRangeCheckLastTarget = tGuidNow
       tRangeCheckLastTargetminRange = tMinRange
       tCheckRequired = true
    else

@@ -259,7 +259,7 @@ function SkuUtil:TooltipFirstLine(...)
 		local region = select(i, ...)
 		if region and region.GetObjectType and region:GetObjectType() == "FontString" then
 			local text = region.GetText and region:GetText()
-			if text and text ~= "" then
+			if text and not Sku.IsSecret(text) and text ~= "" then
 				return text
 			end
 		end

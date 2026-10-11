@@ -27,6 +27,7 @@ local function RegisterSkuMobEvents()
 	--SkuMob:RegisterEvent("PLAYER_ENTERING_WORLD")
 	SkuMob:RegisterEvent("VARIABLES_LOADED")
 	SkuMob:RegisterEvent("PLAYER_TARGET_CHANGED")
+	SkuMob:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 	SkuMob:RegisterEvent("QUEST_TURNED_IN")
 	SkuMob:RegisterEvent("PLAYER_SOFT_ENEMY_CHANGED")
 	SkuMob:RegisterEvent("PLAYER_SOFT_FRIEND_CHANGED")
@@ -379,20 +380,20 @@ local function tSoftAnnounceHeld()
 end
 function SkuMob:PLAYER_SOFT_ENEMY_CHANGED(arg1, arg2, arg3)
 	tSoftTrace("enemy", "softenemy", arg2, arg3)
-	if not UnitGUID("softenemy") then
+	if not Sku.SafeGUID("softenemy") then
 		if SkuOptions.db.profile["SkuOptions"].softTargeting.enemy.soundNoTarget ~= " " then
-			if UnitGUID("softenemy") ~= tLastSoftEnemyGuid then
+			if Sku.SafeGUID("softenemy") ~= tLastSoftEnemyGuid then
 				SkuOptions.Voice:OutputString(SkuOptions.db.profile["SkuOptions"].softTargeting.enemy.soundNoTarget, true, true, 0.3, true)
 			end
 		end
-		tLastSoftEnemyGuid = UnitGUID("softenemy")
+		tLastSoftEnemyGuid = Sku.SafeGUID("softenemy")
 		return
 	end
 	if SkuOptions.db.profile["SkuOptions"].softTargeting.enemy.enabled ~= true then
 		return
 	end
 
-	if UnitGUID("softenemy") ~= UnitGUID("target") then
+	if Sku.SafeGUID("softenemy") ~= Sku.SafeGUID("target") then
 		if SkuOptions.db.profile["SkuOptions"].softTargeting.enemy.forPlayers == false and (UnitIsPlayer("softenemy") == true and UnitIsEnemy("player", "softenemy") == true) then
 			return
 		end
@@ -412,19 +413,19 @@ function SkuMob:PLAYER_SOFT_ENEMY_CHANGED(arg1, arg2, arg3)
 			end
 		end
 	end
-	tLastSoftEnemyGuid = UnitGUID("softenemy")
+	tLastSoftEnemyGuid = Sku.SafeGUID("softenemy")
 end
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuMob:PLAYER_SOFT_FRIEND_CHANGED(aEvent, aGuid, aNewGuid)
 	tSoftTrace("friend", "softfriend", aGuid, aNewGuid)
-	if not UnitGUID("softfriend") then
+	if not Sku.SafeGUID("softfriend") then
 		return
 	end
 	if tSoftAnnounceHeld() then
 		return
 	end
 
-	if UnitGUID("softfriend") ~= UnitGUID("target") then
+	if Sku.SafeGUID("softfriend") ~= Sku.SafeGUID("target") then
 		if SkuOptions.db.profile["SkuOptions"].softTargeting.friend.forPlayers == false and (UnitIsPlayer("softfriend") == true and UnitIsFriend("player", "softfriend") == true) then
 			return
 		end
@@ -442,7 +443,7 @@ end
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuMob:PLAYER_SOFT_INTERACT_CHANGED(aEvent, aGuid, aNewGuid)
 	tSoftTrace("interact", "softinteract", aGuid, aNewGuid)
-	if not UnitGUID("softinteract") then
+	if not Sku.SafeGUID("softinteract") then
 		return
 	end
 	if tSoftAnnounceHeld() then
@@ -452,8 +453,8 @@ function SkuMob:PLAYER_SOFT_INTERACT_CHANGED(aEvent, aGuid, aNewGuid)
 	if SkuOptions.db.profile["SkuOptions"].softTargeting.interact.enabled ~= true then
 		return
 	end
-	if UnitGUID("softinteract") ~= UnitGUID("target") then
-		--print("SkuMob:PLAYER_SOFT_INTERACT_CHANGED(aEvent, ", aGuid, UnitGUID("softinteract"))
+	if Sku.SafeGUID("softinteract") ~= Sku.SafeGUID("target") then
+		--print("SkuMob:PLAYER_SOFT_INTERACT_CHANGED(aEvent, ", aGuid, Sku.SafeGUID("softinteract"))
 		if ((SkuOptions.db.profile["SkuOptions"].softTargeting.interact.soundfor == 2 and UnitExists("softinteract") == false) 
 			or (
 					(SkuOptions.db.profile["SkuOptions"].softTargeting.interact.soundfor == 3 and UnitExists("softinteract") == true and UnitIsDead("softinteract") == true) 
@@ -561,6 +562,13 @@ function SkuMob:MuteTargetHealthAtTarget(aUnitId)
 		if tTargetHealthMuted then tRestoreTargetHealth() end
 		return
 	end
+	-- Das eigene Tier: die Ziel-Gesundheit ist die einzige Moeglichkeit, seine Gesundheit zu hoeren (die Zahl selbst ist fuer AddOns
+	-- gesperrt). Die Stummschaltung bis zum ersten Schaden wuerde die Ansage beim Anvisieren des unverletzten Tiers verschlucken
+	-- (Lena, 10.10.2026: "kommt nur der Petname, nicht die HP"). Beim Tier deshalb nicht stummschalten.
+	if UnitIsUnit("target", "pet") then
+		if tTargetHealthMuted then tRestoreTargetHealth() end
+		return
+	end
 	if tTargetHealthMuted then
 		-- new target while still muted: stay muted, restart the safety timer
 		tTargetHealthMuteToken = tTargetHealthMuteToken + 1
@@ -599,6 +607,31 @@ do
 	end)
 end
 
+
+-- [Forever, Instanzen] Ist die GUID eines Gegners geheim, haengt Skus Gegnerfarbe (Rot, Blau ...) an seiner Namensplakette:
+-- "plate:nameplateN". UnitIsUnit(Ziel, nameplateN) ist dort lesbar (Probe 11.10.2026) und trifft genau eine Plakette.
+-- Die Farbe wird frei, sobald die Plakette verschwindet.
+function SkuMob:PlateKeyForUnit(aUnitId)
+	if not aUnitId then return nil end
+	for x = 1, 40 do
+		local tToken = "nameplate"..x
+		if UnitExists(tToken) then
+			local tOk, tSame = pcall(UnitIsUnit, aUnitId, tToken)
+			if tOk and not Sku.IsSecret(tSame) and tSame == true then
+				return "plate:"..tToken
+			end
+		end
+	end
+	return nil
+end
+
+function SkuMob:NAME_PLATE_UNIT_REMOVED(aEvent, aUnitToken)
+	if type(aUnitToken) ~= "string" or Sku.IsSecret(aUnitToken) then return end
+	local tAq = SkuCore and SkuCore.aqCombat
+	if tAq and tAq.aqCombatSetSkuRaidTarget then
+		pcall(tAq.aqCombatSetSkuRaidTarget, tAq, "plate:"..aUnitToken, nil)
+	end
+end
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 	if aUnitId == nil or aUnitId == "target" then
@@ -612,13 +645,14 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 		dprint("SkuMob PLAYER_TARGET_CHANGED(event, ", event, aUnitId)
 
 		if aUnitId == "target" then
-			SkuCore.RangeCheck:DoRangeCheck(true, nil, "target")
+			-- pcall: ein Fehler in der Reichweitenpruefung darf die Zielansage nie verschlucken
+			pcall(SkuCore.RangeCheck.DoRangeCheck, SkuCore.RangeCheck, true, nil, "target")
 
 			-- [42.11] Option "no interact soft targeting while an ATTACKABLE hard
 			-- target is locked" is a property of WHAT is targeted, so the rule is
 			-- re-evaluated here and nowhere else -- no ticker, no polling. No-op
 			-- unless the wanted CVar value actually changed.
-			SkuOptions:UpdateSoftTargetLockRule()
+			pcall(SkuOptions.UpdateSoftTargetLockRule, SkuOptions)
 		end
 
 		if not UnitExists(aUnitId) and aUnitId ~= "softinteract" then
@@ -627,7 +661,17 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 		end
 
 		local tUnitName = GetUnitName(aUnitId, false)
+		-- Forever: in Instanzen ist der Name fremder Einheiten "geheim" - Vergleiche und Verkettungen werfen dann Fehler und die
+		-- Zielansage blieb stumm. tUnitNameRaw = lesbarer Name oder nil; bei geheimem Namen sagt Sku "Gegner"/"Einheit" statt zu schweigen.
+		local tUnitNameRaw = tUnitName
+		local tSecretName = nil
+		if tUnitName ~= nil and Sku.IsSecret(tUnitName) then
+			tUnitNameRaw = nil
+			tSecretName = tUnitName   -- wird unten direkt ueber C_VoiceChat.SpeakText gesprochen (Sku kann ihn nicht verketten)
+			tUnitName = ""
+		end
 		local tUnitLevel = UnitLevel(aUnitId)
+		if tUnitLevel ~= nil and Sku.IsSecret(tUnitLevel) then tUnitLevel = nil end   -- Forever/Instanz: Stufe kann geheim sein
 		local tClassification = UnitClassification(aUnitId)
 
 		local noSubText
@@ -665,12 +709,12 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 			tIsPlayerControled = true
 			noSubText = true
 		end
-		if UnitExists("pet") and (GetUnitName("pet", false) == GetUnitName(aUnitId, false)) then
+		if UnitExists("pet") and tUnitNameRaw ~= nil and (GetUnitName("pet", false) == tUnitNameRaw) then
 			tUnitName = SkuMob:GetTtsAwareUnitName(aUnitId)--L["dein begleiter"]
 			tIsPlayerControled = true
 			noSubText = true
 		end
-		if GetUnitName(aUnitId, false) == GetUnitName("player", false) then
+		if tUnitNameRaw ~= nil and tUnitNameRaw == GetUnitName("player", false) then
 			tUnitName = SkuMob:GetTtsAwareUnitName(aUnitId)--L["du selbst"]
 			tIsPlayerControled = true
 			noSubText = true
@@ -734,23 +778,62 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 		tRosterNames[name] = name
 
 		local status = nil
+		-- Forever/Midnight: UnitThreatSituation ist im Kampf "geheim" (SecretWhenUnitThreatStateRestricted). Ein Test wie
+		-- `if UnitThreatSituation(...) then` bricht dann ab oder liefert nichts -> kein "im Kampf", keine Farbe. Die Zahl selbst bleibt
+		-- unlesbar, aber "hat einen Eintrag" laesst sich ueber einen geschuetzten Test erfragen.
+		local tThreatSecret = false
+		local function tHasThreat(aUnit)
+			local tOk, tVal = pcall(UnitThreatSituation, aUnit, aUnitId)
+			if not tOk then return nil end
+			if Sku.IsSecret(tVal) then
+				tThreatSecret = true
+				local tOk2, tHas = pcall(function() return tVal and true or false end)
+				return (tOk2 and tHas) and true or nil
+			end
+			return tVal or nil
+		end
 		if tIsInGroup then
 			for x = 1, 4 do
-				if UnitThreatSituation("party"..x, aUnitId) then
-					status = UnitThreatSituation("party"..x, aUnitId)
-				end
+				status = tHasThreat("party"..x) or status
 			end
 		end
 		for x = 1, tRaidSize do
-			if UnitThreatSituation("raid"..x, aUnitId) then
-				status = UnitThreatSituation("raid"..x, aUnitId)
+			status = tHasThreat("raid"..x) or status
+		end
+		status = tHasThreat("pet") or status
+		status = tHasThreat("player") or status
+		-- Bedrohung unlesbar und nichts gefunden: Ersatz ueber die Kampfflagge des Gegners (nicht geheim), aber nur fuer Gegner, die mit
+		-- UNS kaempfen - sein Ziel ist du, dein Tier oder ein Gruppenmitglied, oder einer von uns hat ihn im Ziel. Fremde Spieler zaehlen nicht.
+		-- Verglichen wird mit UnitIsUnit: in Instanzen sind GUID und Name von Gegnern (auch Bossen) geheim, der Vergleich zweier
+		-- Einheiten bleibt aber lesbar (Probe 11.10.2026).
+		if not status and (tThreatSecret == true or Sku.isForever == true) and UnitCanAttack("player", aUnitId) then
+			local tOkC, tInCombat = pcall(UnitAffectingCombat, aUnitId)
+			if tOkC and tInCombat == true then
+				local tOurs = { "player", "pet" }
+				if tIsInGroup then
+					for x = 1, 4 do
+						tOurs[#tOurs + 1] = "party"..x
+						tOurs[#tOurs + 1] = "partypet"..x
+					end
+				end
+				for x = 1, tRaidSize do
+					tOurs[#tOurs + 1] = "raid"..x
+					tOurs[#tOurs + 1] = "raidpet"..x
+				end
+				local tEnemyTarget = aUnitId.."target"
+				for _, tUnit in ipairs(tOurs) do
+					if UnitExists(tUnit) then
+						-- sein Ziel ist einer von uns
+						local tOk1, tSame1 = pcall(UnitIsUnit, tEnemyTarget, tUnit)
+						-- oder einer von uns hat ihn im Ziel
+						local tOk2, tSame2 = pcall(UnitIsUnit, tUnit.."target", aUnitId)
+						if (tOk1 and not Sku.IsSecret(tSame1) and tSame1 == true) or (tOk2 and not Sku.IsSecret(tSame2) and tSame2 == true) then
+							status = true
+							break
+						end
+					end
+				end
 			end
-		end
-		if UnitThreatSituation("pet", aUnitId) then
-			status = UnitThreatSituation("pet", aUnitId)
-		end
-		if UnitThreatSituation("player", aUnitId) then
-			status = UnitThreatSituation("player", aUnitId)
 		end
 
 		-- Is my target attacking me, my pet or a groupmate? That is what makes a mob
@@ -760,7 +843,7 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 		-- no target at all, or a stranger -- comes back as "", which used to match
 		-- the "" key in tRosterNames and flag EVERY target as in combat.
 		local name, realm = SkuMob:GetTtsAwareUnitName("targettarget")
-		if name and name ~= "" then
+		if name and not Sku.IsSecret(name) and name ~= "" then
 			if tRosterNames[name] then
 				status = true
 			end
@@ -787,13 +870,22 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 			end
 		end
 		
-		local tUnitGUID = UnitGUID(aUnitId)
+		local tUnitGUID = Sku.SafeGUID(aUnitId)
+		if tUnitGUID == nil and aUnitId and UnitExists(aUnitId) then
+			tUnitGUID = SkuMob:PlateKeyForUnit(aUnitId)   -- geheime GUID: Farbe haengt an der Plakette
+		end
 		--sku raid target
 		if tRaidtarget == nil or tRaidtarget == "" then
 			if SkuCore.aqCombat:aqCombatGetSkuRaidTarget(tUnitGUID) ~= nil then
 				tRaidTargetString = SkuCore.RaidTargetValues[SkuCore.aqCombat:aqCombatGetSkuRaidTarget(tUnitGUID)].color..";"
 			else
 				if UnitCanAttack("player", aUnitId) and tIsPlayerControled == false and status then
+					-- Einmalig einschalten (11.10.2026, auf Lenas Wunsch): Skus eigene Gegnerfarben (Rot, Blau, ...) fuer Gegner im Kampf.
+					-- Danach bleibt die Wahl im Menue.
+					if SkuSettings:Sub("SkuMob").autoRaidTargetsAutoOnDone ~= true then
+						SkuSettings:Sub("SkuMob").autoRaidTargetsAutoOnDone = true
+						SkuSettings:Sub("SkuMob").autoSetSkuRaidTargetsToInCombatCreatures = true
+					end
 					if SkuSettings:Sub("SkuMob").autoSetSkuRaidTargetsToInCombatCreatures == true then
 						local tNewRaidTargetId = SkuCore.aqCombat:aqCombatSetSkuRaidTarget(tUnitGUID, 0)
 						if tNewRaidTargetId then
@@ -869,6 +961,7 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 		end
 		
 		local tClassification = UnitClassification(aUnitId) or ""
+		if Sku.IsSecret(tClassification) then tClassification = "" end
 		local tClassifications = {
 			["worldboss"] = L["world boss"] , 
 			["rareelite"] = L["Rare Elite"], 
@@ -877,6 +970,7 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 			["normal"] = "", 
 			["trivial"] = "", 
 			["minus"] = "",
+			[""] = "",
 		}
 
 		if tRaidTargetString == "" or SkuSettings:Sub("SkuMob").vocalizeRaidTargetOnly == false then
@@ -915,7 +1009,7 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 				local left = _G["GameTooltipTextLeft" .. 2]
 				if left then
 					local tLineTwoText = left:GetText()
-					if tLineTwoText then
+					if tLineTwoText and not Sku.IsSecret(tLineTwoText) then
 						if tLineTwoText ~= "" then
 							if not string.find(tLineTwoText, L["level"]) then
 								--SkuOptions.Voice:OutputString(tLineTwoText, false, true, 0.3)
@@ -938,7 +1032,31 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 		-- "target announce was silent" report can be checked against the ring:
 		-- entry logged but nothing audible -> voice/queue layer; no entry at all ->
 		-- the event never fired (e.g. key press on the already-current target).
-		if tIsPlayerControled == false or SkuSettings:Sub("SkuMob").vocalizePlayerNamePlaceholdersSkuTts == true then
+		-- Geheimer Name (Gegner in Instanzen): Farbe, Name, Rest (Stufe, Elite ...) nacheinander direkt ueber die Blizzard-Sprachausgabe.
+		-- Ueber Skus eigene Warteschlange ging der Name verloren (sie bricht laufende Sprache ab).
+		local tSecretHandled = false
+		if tSecretName ~= nil then
+			local tUseA = (tIsPlayerControled == false or SkuSettings:Sub("SkuMob").vocalizePlayerNamePlaceholdersSkuTts == true)
+			local tRest = tostring((tUseA and tOutputString) or tOutputStringB or "")
+			local tColor = ""
+			if tRaidTargetString ~= nil and tRaidTargetString ~= "" then
+				local tI, tJ = string.find(tRest, tRaidTargetString, 1, true)
+				if tI then
+					tRest = string.sub(tRest, 1, tI - 1)..string.sub(tRest, tJ + 1)
+					tColor = (string.gsub(tRaidTargetString, ";", ", "))
+				end
+			end
+			tRest = (string.gsub(string.gsub(tRest, "^%s+", ""), "%s+$", ""))
+			tColor = (string.gsub(string.gsub(tColor, "^%s+", ""), "%s+$", ""))
+			local tColorSpoken = false
+			if tColor ~= "" then tColorSpoken = Sku.SpeakPlainQueued(tColor, true) end
+			tSecretHandled = Sku.SpeakSecretText(tSecretName, tColorSpoken)
+			dprint("SkuMob PTC speak secret name via SpeakText, color:", tColor, "rest:", tRest)
+			if tSecretHandled and tRest ~= "" then Sku.SpeakPlainQueued(tRest) end
+		end
+		if tSecretHandled then
+			-- alles gesprochen
+		elseif tIsPlayerControled == false or SkuSettings:Sub("SkuMob").vocalizePlayerNamePlaceholdersSkuTts == true then
 			dprint("SkuMob PTC speak (audio):", tOutputString)
 			SkuOptions.Voice:OutputString(tOutputString, true, true, 0.3)
 		else
@@ -946,5 +1064,24 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 			SkuOptions.Voice:OutputStringBTtts(tOutputStringB, true, true, 0.3, nil, nil, nil, 1)
 		end
 
+	end)
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
+-- R (ASSISTTARGET) = Ziel des Ziels / des Gruppenmitglieds uebernehmen. Aendert sich dabei das Ziel nicht (es ist schon das gleiche, oder
+-- es gibt nichts zu uebernehmen), feuert PLAYER_TARGET_CHANGED nicht und die Taste blieb stumm. Der Haken wartet kurz und sagt dann das
+-- aktuelle Ziel an bzw. "Kein Ziel".
+if _G.AssistUnit and not SkuMob.assistUnitHooked then
+	SkuMob.assistUnitHooked = true
+	hooksecurefunc("AssistUnit", function()
+		local tStart = GetTime()
+		C_Timer.After(0.35, function()
+			if tLastHardTargetChange >= tStart then return end
+			if UnitExists("target") then
+				SkuMob:PLAYER_TARGET_CHANGED("PLAYER_TARGET_CHANGED", "target")
+			else
+				SkuOptions.Voice:OutputString(L["No target"], true, true, 0.3, true)
+			end
+		end)
 	end)
 end

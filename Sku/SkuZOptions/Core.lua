@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
+﻿---@diagnostic disable: undefined-field, undefined-doc-name, undefined-doc-param
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 local MODULE_NAME = "SkuOptions"
@@ -1293,6 +1293,21 @@ function SkuOptions:UpdateOverviewText(aPageId)
 			end
 		end
 	end
+	-- Forever/Camelot: die Fertigkeitenliste (Waffen, Ruestung, Sprachen, Berufe ...) gibt es dort als C_SkillInfo; die alten Globals
+	-- GetNumSkillLines/GetSkillLineInfo fehlen. Gleiche Auswahl wie Blizzards Fertigkeiten-Reiter: Unterzeilen (parentSkillLineID ~= 0)
+	-- und Kopfzeilen werden nicht einzeln aufgefuehrt.
+	if tTmpText == "" and _G.C_SkillInfo and C_SkillInfo.GetNumSkillLines and C_SkillInfo.GetSkillLineInfo then
+		pcall(function()
+			for x = 1, C_SkillInfo.GetNumSkillLines() do
+				local tInfo = C_SkillInfo.GetSkillLineInfo(x)
+				if tInfo and not tInfo.isHeader and (tInfo.parentSkillLineID or 0) == 0
+					and type(tInfo.name) == "string" and not Sku.IsSecret(tInfo.name) then
+					local tMod = (tInfo.modifier and tInfo.modifier ~= 0) and (" "..(tInfo.modifier > 0 and "+" or "")..tInfo.modifier) or ""
+					tTmpText = tTmpText.."\r\n"..tInfo.name.." ("..tostring(tInfo.rank or 0).." / "..tostring(tInfo.maxRank or 0)..")"..tMod
+				end
+			end
+		end)
+	end
 	-- WoW Forever/Camelot has no skill list (GetNumSkillLines / C_SkillLine are gone), so it is
 	-- rebuilt from what exists there: the professions API and the spellbook.
 	if tTmpText == "" then
@@ -1489,7 +1504,8 @@ function SkuOptions:UpdateOverviewText(aPageId)
 						if not tFound[spellName] then
 							tFound[spellName] = true
 							local start, duration, enabled, modRate = GetSpellCooldown(spellID)
-							if (start > 0 and duration > 1.5) then
+							-- Forever/Instanz: Abklingzeit-Werte koennen geheim sein (Vergleich wirft und liess die ganze Uebersicht ausfallen)
+							if start ~= nil and duration ~= nil and not Sku.IsSecret(start) and not Sku.IsSecret(duration) and (start > 0 and duration > 1.5) then
 								tTmpText = tTmpText..spellName.." "..SkuEpochValueHelper(GetServerTime() - math.floor(start + duration - GetTime())).."\r\n"
 							end
 						end
@@ -2026,53 +2042,24 @@ function SkuOptions:CreateMainFrame()
 		end
 	
 		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLNEED") then
-			if SkuOptions.nextRollFrameNumber then
-				if _G["GroupLootFrame"..SkuOptions.nextRollFrameNumber] then
-					if _G["GroupLootFrame"..SkuOptions.nextRollFrameNumber]:IsVisible() then
-						_G["GroupLootFrame"..SkuOptions.nextRollFrameNumber].NeedButton:Click()
-						SkuOptions.Voice:OutputString(L["Need rolled"], true, true, 0.3, true)
-						C_Timer.NewTimer(0.5, function()
-							if _G["StaticPopup1"]:IsVisible() then
-								_G["StaticPopup1Button1"]:Click()
-							end
-						end)
-					end
-				end
-			end
+			SkuOptions:DoRoll("need")
 			return
 		end
 		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLGREED") then
-			if SkuOptions.nextRollFrameNumber then
-				if _G["GroupLootFrame"..SkuOptions.nextRollFrameNumber] then
-					if _G["GroupLootFrame"..SkuOptions.nextRollFrameNumber]:IsVisible() then
-						_G["GroupLootFrame"..SkuOptions.nextRollFrameNumber].GreedButton:Click()
-						SkuOptions.Voice:OutputString(L["Greed rolled"], true, true, 0.3, true)
-						C_Timer.NewTimer(0.5, function()
-							if _G["StaticPopup1"]:IsVisible() then
-								_G["StaticPopup1Button1"]:Click()
-							end
-						end)
-					end
-				end
-			end
+			SkuOptions:DoRoll("greed")
 			return
 		end
 		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLPASS") then
-			if SkuOptions.nextRollFrameNumber then
-				if _G["GroupLootFrame"..SkuOptions.nextRollFrameNumber] then
-					if _G["GroupLootFrame"..SkuOptions.nextRollFrameNumber]:IsVisible() then
-						_G["GroupLootFrame"..SkuOptions.nextRollFrameNumber].PassButton:Click()
-						SkuOptions.Voice:OutputString(L["Pass rolled"], true, true, 0.3, true)
-					end
-				end
-			end
+			SkuOptions:DoRoll("pass")
 			return
 		end
 		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLINFO") then
-			local tItem
-			SkuOptions.nextRollFrameNumber, tItem = SkuOptions:GetCurrentRollItem()
-			if SkuOptions.nextRollFrameNumber then
-				SkuOptions.Voice:OutputStringBTtts(L["Roll on"].." "..tItem.name..", "..tItem.alFavoriteString..", "..tItem.quality..", "..tItem.bind..", "..tItem.type..", "..tItem.subtype, true, true, 0.3, true, nil, nil, 2)
+			local tRollID, tItem = SkuOptions:GetCurrentRollItem()
+			if tRollID and tItem then
+				SkuOptions.nextRollFrameNumber = tRollID
+				SkuOptions.Voice:OutputStringBTtts(SkuOptions:RollItemText(tItem), true, true, 0.3, true, nil, nil, 2)
+			else
+				SkuOptions.Voice:OutputString(Sku.deEn("Kein Würfeln offen", "no roll open", "aucun jet ouvert"), true, true, 0.3, true)
 			end
 			return
 		end
@@ -2080,7 +2067,33 @@ function SkuOptions:CreateMainFrame()
 		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_QUESTSHARE") then
 			SkuOptions.TooltipReaderText = ""
 
-			if GameTooltip:IsVisible() == true then
+			-- Gibt es einen offenen Wuerfelwurf, gehoert die Taste dem Gegenstand (frueher las sie zuerst den Tooltip unter der Maus,
+			-- z. B. ein Totem, und blieb dort, wenn das Lesen des Gegenstands scheiterte).
+			local tRollID, tRollItem = SkuOptions:GetCurrentRollItem()
+			if tRollID and tRollItem then
+				SkuOptions.nextRollFrameNumber = tRollID
+				local tRollText = SkuOptions:RollTooltipText(tRollID, tRollItem.itemId)
+				if tRollText and tRollText ~= "" then
+					SkuOptions.TooltipReaderText = { tRollText }
+					pcall(function()
+						local t = {}
+						local comparisnSections = SkuCore:getItemComparisnSections(tRollItem.itemId, t)
+						if comparisnSections then
+							for i, section in ipairs(comparisnSections) do
+								local sectionHeader = #comparisnSections > 1 and L["currently equipped"].." "..i.."\r\n" or L["currently equipped"].."\r\n"
+								table.insert(SkuOptions.TooltipReaderText, i + 1, sectionHeader .. section)
+							end
+						end
+					end)
+					SkuOptions.TTS:Output(SkuOptions.TooltipReaderText, 1000)
+					SkuOptions.TTS:PreviousLine()
+				else
+					SkuOptions.Voice:OutputString(Sku.deEn("Kein Tooltip verfügbar", "no tooltip available", "aucune infobulle disponible"), true, true, 0.3, true)
+				end
+				return
+			end
+
+			if GameTooltip:IsVisible() == true then pcall(function()   -- pcall: geheimer Tooltip-Text (Instanz) darf das Lesen nicht abbrechen
 				if TooltipLines_helper(GameTooltip:GetRegions()) ~= "asd" then
 					if TooltipLines_helper(GameTooltip:GetRegions()) ~= "" then
 						local tText = SkuUtil:Unescape(TooltipLines_helper(GameTooltip:GetRegions()))
@@ -2093,37 +2106,7 @@ function SkuOptions:CreateMainFrame()
 						end
 					end
 				end
-			end
-			SkuOptions.nextRollFrameNumber, tItem = SkuOptions:GetCurrentRollItem()
-			if SkuOptions.nextRollFrameNumber then
-				if tItem.itemId then
-					SkuUtil:ResetScanningTooltip()
-					SkuScanningTooltip:SetHyperlink(tItem.itemId)--("linkString"
-					SkuScanningTooltip:Show()
-					if TooltipLines_helper(SkuScanningTooltip:GetRegions()) ~= "asd" then
-						if TooltipLines_helper(SkuScanningTooltip:GetRegions()) ~= "" then
-							local tText = SkuUtil:Unescape(TooltipLines_helper(SkuScanningTooltip:GetRegions()))
-							if tText then
-								if string.len(tText) > 0 then
-									SkuOptions.TooltipReaderText =  {tText}
-									local t = {}
-									local comparisnSections = SkuCore:getItemComparisnSections(tItem.itemId, t)
-									if comparisnSections then
-										for i, section in ipairs(comparisnSections) do
-											local sectionHeader = #comparisnSections > 1 and L["currently equipped"].." "..i.."\r\n" or L["currently equipped"].."\r\n"
-											table.insert(SkuOptions.TooltipReaderText, i + 1, sectionHeader .. section)
-										end
-									end
-
-									SkuOptions.TTS:Output(SkuOptions.TooltipReaderText, 1000)
-									SkuOptions.TTS:PreviousLine()
-								end
-							end
-						end
-					end
-					--SkuScanningTooltip:Hide()
-				end
-			end			
+			end) end
 			return
 		end
 
@@ -3011,7 +2994,7 @@ function SkuOptions:CreateMainFrame()
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
-function SkuOptions:AddExtraTooltipData(aUnmodifiedTextFull, aItemId)
+function SkuOptions:AddExtraTooltipDataRaw(aUnmodifiedTextFull, aItemId)
 	--print("AddExtraTooltipData", aUnmodifiedTextFull, aItemId)
 	if not aUnmodifiedTextFull then
 		return ""
@@ -3028,7 +3011,7 @@ function SkuOptions:AddExtraTooltipData(aUnmodifiedTextFull, aItemId)
 	local tDNA
 	local tRatingIndex = #aUnmodifiedTextFull
 	for i, v in pairs(aUnmodifiedTextFull) do
-		if string.find(v, L["Wertung:"]) then
+		if type(v) == "string" and not Sku.IsSecret(v) and string.find(v, L["Wertung:"]) then
 			tDNA = true
 			tRatingIndex = i
 		end
@@ -3038,6 +3021,7 @@ function SkuOptions:AddExtraTooltipData(aUnmodifiedTextFull, aItemId)
 
 	if not tDNA then
 		local tFirstLine = aUnmodifiedTextFull[1] or aUnmodifiedTextFull
+		if Sku.IsSecret(tFirstLine) then tFirstLine = "" end
 		if type(tFirstLine) == "table" then
 			tFirstLine = ""
 		end
@@ -3081,6 +3065,17 @@ function SkuOptions:AddExtraTooltipData(aUnmodifiedTextFull, aItemId)
 	end
 
 	return tNewTextFull
+end
+
+-- Schutz: ein geheimer Tooltip-Text (Instanz) darf das Vorlesen eines Menue-Eintrags nicht kippen; im Fehlerfall gilt der unveraenderte Text.
+function SkuOptions:AddExtraTooltipData(aUnmodifiedTextFull, aItemId)
+	local tOk, tResult = pcall(SkuOptions.AddExtraTooltipDataRaw, SkuOptions, aUnmodifiedTextFull, aItemId)
+	if tOk then return tResult end
+	if type(aUnmodifiedTextFull) == "function" then
+		local tOk2, tText = pcall(aUnmodifiedTextFull)
+		return tOk2 and tText or ""
+	end
+	return aUnmodifiedTextFull or ""
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -4691,6 +4686,7 @@ function SkuOptions:OnInitialize()
 	SkuOptions:RegisterEvent("START_LOOT_ROLL")
 	SkuOptions:RegisterEvent("CANCEL_LOOT_ROLL")
 	SkuOptions:RegisterEvent("LOOT_SLOT_CHANGED")
+	SkuOptions:RegisterEvent("CONFIRM_LOOT_ROLL")
 
 	SkuOptions:CreateControlFrame()
 	SkuOptions:CreateMainFrame()
@@ -5264,74 +5260,239 @@ end
 ---------------------------------------------------------------------------------------------------------------------------------------
 
 SkuOptions.nextRollFrameNumber = 0
-function SkuOptions:START_LOOT_ROLL(rollID, rollTime, lootHandle, a, b)
-	--print("START_LOOT_ROLL(rollID, rollTime, lootHandle, a, b", rollID, rollTime, lootHandle, a, b)
-	local tItem
-	SkuOptions.nextRollFrameNumber, tItem = SkuOptions:GetCurrentRollItem()
-	if SkuOptions.nextRollFrameNumber then
-		SkuOptions.Voice:OutputStringBTtts(L["Roll on"].." "..tItem.name..", "..tItem.alFavoriteString..", "..tItem.quality..", "..tItem.bind..", "..tItem.type..", "..tItem.subtype, true, true, 0.3, true, nil, nil, 2)
-	end
-end
+SkuOptions.activeRollIDs = {}      -- [rollID] = Startzeit (aus START_LOOT_ROLL)
+SkuOptions.rolledIDs = {}          -- [rollID] = true, sobald Sku darauf geantwortet hat
 
----------------------------------------------------------------------------------------------------------------------------------------
-function SkuOptions:CANCEL_LOOT_ROLL(rollID, a, b)
-	--print("CANCEL_LOOT_ROLL(rollID, a, b", rollID, a, b)
-	local tItem
-	SkuOptions.nextRollFrameNumber, tItem = SkuOptions:GetCurrentRollItem()
-	if SkuOptions.nextRollFrameNumber then
-		SkuOptions.Voice:OutputStringBTtts(L["Roll on"].." "..tItem.name..", "..tItem.alFavoriteString..", "..tItem.quality..", "..tItem.bind..", "..tItem.type..", "..tItem.subtype, true, true, 0.3, true, nil, nil, 2)
-	end
-end
+-- [Forever] Beute-Wuerfeln. Frueher wurde die Ansage aus den Blizzard-Fenstern GroupLootFrame1..6 gelesen: Sie waren beim
+-- Ereignis noch nicht sichtbar (Blizzard zeigt sie erst danach), auf Forever liegen die Knoepfe ausserdem in .LootButtonContainer,
+-- und AceEvent liefert den Ereignisnamen als ersten Parameter (rollID war damit der Text "START_LOOT_ROLL"). Ergebnis: bei einem
+-- Wurf kam keine Ansage und die Tasten taten nichts. Jetzt laeuft alles ueber die rollID und Blizzards Lootfunktionen.
 
----------------------------------------------------------------------------------------------------------------------------------------
-function SkuOptions:LOOT_SLOT_CHANGED(lootSlot, a, b)
-	--print("OT_CHANGED(lootSlot, a, b", lootSlot, a, b)
-	local tItem
-	SkuOptions.nextRollFrameNumber, tItem = SkuOptions:GetCurrentRollItem()
-	if SkuOptions.nextRollFrameNumber then
-		print("SkuOptions.nextRollFrameNumber", SkuOptions.nextRollFrameNumber, tItem, tItem.name)
-		SkuOptions.Voice:OutputStringBTtts(L["Roll on"].." "..tItem.name..", "..tItem.alFavoriteString..", "..tItem.quality..", "..tItem.bind..", "..tItem.type..", "..tItem.subtype, true, true, 0.3, true, nil, nil, 2)
+-- Daten eines Wurfs. nil, solange das Spiel den Gegenstand noch nicht kennt.
+function SkuOptions:RollItemInfo(aRollID)
+	if not aRollID then return nil end
+	local tOk, _, tName, tCount, tQuality, tBop, tCanNeed, tCanGreed, tCanDE, _, _, _, _, tCanTransmog = pcall(GetLootRollItemInfo, aRollID)
+	if not tOk or not tName then return nil end
+	local tOkL, tLink = pcall(GetLootRollItemLink, aRollID)
+	if not tOkL then tLink = nil end
+	local tType, tSubType, tBindType, tItemQuality
+	if tLink then
+		local tOkI, _, _, tQ, _, _, tT, tS, _, _, _, _, _, _, tB = pcall(C_Item.GetItemInfo, tLink)
+		if tOkI then tItemQuality, tType, tSubType, tBindType = tQ, tT, tS, tB end
 	end
-end
-
----------------------------------------------------------------------------------------------------------------------------------------
-function SkuOptions:GetCurrentRollItem()
-	--print("GetCurrentRollItem()")
-	local tLootFrameNumber = nil
-	local tLootItem = nil
-	for x = 1, 6 do
-		if _G["GroupLootFrame"..x] then
-			if _G["GroupLootFrame"..x]:IsVisible() then
-				tLootFrameNumber = x
-				local itemName, itemLink, itemQuality, itemLevel, itemMinLevel, itemType, itemSubType, itemStackCount, itemEquipLoc, itemTexture, sellPrice, classID, subclassID, bindType, expacID, setID, isCraftingReagent = C_Item.GetItemInfo(GetLootRollItemLink(_G["GroupLootFrame"..x].rollID))
-				local tAlFavoriteString = ""
-				local invType = C_Item.GetItemInventoryTypeByID(itemLink)
-				if SkuCore.AtlasLootIntegration and SkuCore.AtlasLootIntegration.favoriteSlots then
-					if invType and itemLink then
-						if SkuCore.AtlasLootIntegration.favoriteSlots[invType] and SkuCore.AtlasLootIntegration.favoriteSlots[invType][1] and #SkuOptions.db.char["SkuCore"].alIntegration.favorites[invType] > 0 then
-							for q = 1, #SkuOptions.db.char["SkuCore"].alIntegration.favorites[invType] do
-								if SkuOptions.db.char["SkuCore"].alIntegration.favorites[invType][q] == itemLink then
-									tAlFavoriteString = L["Prio"].." "..q.." "..L["in AtlasLoot favorites for"].." ".._G[SkuCore.AtlasLootIntegration.favoriteSlots[invType][1]]
-								end
-							end
-						end
+	local tQualityIndex = tQuality or tItemQuality
+	local tBind = (tBindType and SkuOptions.BindTypeStrings[tBindType]) or (tBop and L["BOP"]) or ""
+	local tFav = ""
+	pcall(function()
+		local tInv = tLink and C_Item.GetItemInventoryTypeByID(tLink)
+		local tAl = SkuCore.AtlasLootIntegration
+		if tInv and tAl and tAl.favoriteSlots and tAl.favoriteSlots[tInv] and tAl.favoriteSlots[tInv][1] then
+			local tList = SkuOptions.db.char["SkuCore"].alIntegration.favorites[tInv]
+			if tList then
+				for q = 1, #tList do
+					if tList[q] == tLink then
+						tFav = L["Prio"].." "..q.." "..L["in AtlasLoot favorites for"].." ".._G[tAl.favoriteSlots[tInv][1]]
 					end
 				end
+			end
+		end
+	end)
+	return {
+		name = tName, count = tCount or 1,
+		quality = (tQualityIndex and _G["ITEM_QUALITY"..tQualityIndex.."_DESC"]) or "",
+		type = tType or "", subtype = tSubType or "", bind = tBind,
+		itemId = tLink, rollId = aRollID, alFavoriteString = tFav,
+		canNeed = tCanNeed and true or false, canGreed = tCanGreed and true or false, canTransmog = tCanTransmog and true or false,
+	}
+end
 
-				tLootItem = {
-					name = _G["GroupLootFrame"..x.."Name"]:GetText(), 
-					quality = _G["ITEM_QUALITY"..itemQuality.."_DESC"], 
-					type = itemType, 
-					subtype = itemSubType, 
-					bind = SkuOptions.BindTypeStrings[bindType], 
-					itemId = GetLootRollItemLink(_G["GroupLootFrame"..x].rollID), 
-					rollId = _G["GroupLootFrame"..x].rollID, 
-					alFavoriteString = tAlFavoriteString
-				}
+function SkuOptions:RollItemText(aItem)
+	local tParts = { L["Roll on"].." "..aItem.name }
+	if (aItem.count or 1) > 1 then tParts[#tParts + 1] = aItem.count.." "..Sku.deEn("Stück", "pieces", "pièces") end
+	for _, tValue in ipairs({ aItem.alFavoriteString or "", aItem.quality or "", aItem.bind or "", aItem.type or "", aItem.subtype or "" }) do
+		if tValue ~= "" then tParts[#tParts + 1] = tValue end
+	end
+	if aItem.canNeed == false then
+		tParts[#tParts + 1] = Sku.deEn("Bedarf nicht möglich", "need not possible", "besoin impossible")
+	end
+	return table.concat(tParts, ", ")
+end
+
+-- Die gerade aktuelle Wuerfelrunde: die aelteste noch unbeantwortete, sonst die juengste.
+function SkuOptions:CurrentRollID()
+	local tOk, tIDs = pcall(GetActiveLootRollIDs)
+	local tList = {}
+	if tOk and type(tIDs) == "table" then
+		for _, tID in ipairs(tIDs) do tList[#tList + 1] = tID end
+	end
+	if #tList == 0 then
+		-- Falls GetActiveLootRollIDs leer meldet: die selbst mitgeschriebenen Wuerfe (nicht aelter als 3 Minuten)
+		for tID, tTime in pairs(SkuOptions.activeRollIDs) do
+			if GetTime() - tTime < 180 then tList[#tList + 1] = tID end
+		end
+		table.sort(tList)
+	end
+	for _, tID in ipairs(tList) do
+		if not SkuOptions.rolledIDs[tID] then return tID end
+	end
+	return tList[#tList]
+end
+
+function SkuOptions:GetCurrentRollItem()
+	local tID = SkuOptions:CurrentRollID()
+	local tItem = tID and SkuOptions:RollItemInfo(tID)
+	if tItem then return tID, tItem end
+	return nil, nil
+end
+
+function SkuOptions:AnnounceRoll(aRollID, aTry)
+	local tItem = SkuOptions:RollItemInfo(aRollID)
+	if not tItem then
+		-- Gegenstandsdaten noch nicht da: kurz warten und erneut fragen (bis zu 6 Versuche)
+		if (aTry or 0) < 6 then
+			C_Timer.After(0.4, function() SkuOptions:AnnounceRoll(aRollID, (aTry or 0) + 1) end)
+		else
+			SkuOptions.Voice:OutputStringBTtts(L["Roll on"].." "..Sku.deEn("Gegenstand", "item", "objet"), true, true, 0.3, true, nil, nil, 2)
+		end
+		return
+	end
+	SkuOptions.nextRollFrameNumber = aRollID
+	SkuOptions.Voice:OutputStringBTtts(SkuOptions:RollItemText(tItem), true, true, 0.3, true, nil, nil, 2)
+end
+
+-- aKind: "need" | "greed" | "pass"
+function SkuOptions:DoRoll(aKind)
+	local tID, tItem = SkuOptions:GetCurrentRollItem()
+	if not tID then
+		SkuOptions.Voice:OutputString(Sku.deEn("Kein Würfeln offen", "no roll open", "aucun jet ouvert"), true, true, 0.3, true)
+		return
+	end
+	local tRollType, tSpoken
+	if aKind == "need" then
+		if not tItem.canNeed then
+			SkuOptions.Voice:OutputString(Sku.deEn("Bedarf nicht möglich", "need not possible", "besoin impossible"), true, true, 0.3, true)
+			return
+		end
+		tRollType, tSpoken = 1, L["Need rolled"]
+	elseif aKind == "greed" then
+		if tItem.canGreed then
+			tRollType = 2
+		elseif tItem.canTransmog then
+			tRollType = 4
+		else
+			SkuOptions.Voice:OutputString(Sku.deEn("Gier nicht möglich", "greed not possible", "cupidité impossible"), true, true, 0.3, true)
+			return
+		end
+		tSpoken = L["Greed rolled"]
+	else
+		tRollType, tSpoken = 0, L["Pass rolled"]
+	end
+	SkuOptions.pendingRollConfirm = { id = tID, type = tRollType, t = GetTime() }
+	local tOk = pcall(RollOnLoot, tID, tRollType)
+	if not tOk then
+		-- Ersatz: Knopf im Blizzard-Fenster (Forever: .LootButtonContainer, sonst direkt am Fenster)
+		for x = 1, 6 do
+			local tFrame = _G["GroupLootFrame"..x]
+			if tFrame and tFrame.rollID == tID then
+				local tNames = { [1] = "NeedButton", [2] = "GreedButton", [0] = "PassButton", [4] = "TransmogButton" }
+				local tBtn = (tFrame.LootButtonContainer and tFrame.LootButtonContainer[tNames[tRollType]]) or tFrame[tNames[tRollType]]
+				if tBtn and tBtn.Click then
+					pcall(tBtn.Click, tBtn)
+					tOk = true
+				end
+				break
 			end
 		end
 	end
-	return tLootFrameNumber, tLootItem
+	if not tOk then
+		SkuOptions.Voice:OutputString(Sku.deEn("Würfeln fehlgeschlagen", "roll failed", "jet échoué"), true, true, 0.3, true)
+		return
+	end
+	SkuOptions.rolledIDs[tID] = true
+	SkuOptions.Voice:OutputString(tSpoken, true, true, 0.3, true)
+	-- Sicherheitsabfrage (gebundener Gegenstand): wird auch ueber CONFIRM_LOOT_ROLL bestaetigt, hier als Ersatz das Fenster
+	C_Timer.After(0.5, function()
+		local tPopup = _G["StaticPopup1"]
+		if tPopup and tPopup:IsVisible() and tPopup.which == "CONFIRM_LOOT_ROLL" and _G["StaticPopup1Button1"] then
+			_G["StaticPopup1Button1"]:Click()
+		end
+	end)
+end
+
+-- Tooltip-Text eines Wuerfel-Gegenstands. Ohne Tooltip-Fenster: Blizzards Tooltip-Daten (C_TooltipInfo) lesen den Gegenstand direkt
+-- ueber die rollID. Der Scan-Tooltip warf auf Forever bei SetHyperlink "attempt to call a nil value" und las deshalb nichts.
+function SkuOptions:RollTooltipText(aRollID, aLink)
+	local tInfo = _G.C_TooltipInfo
+	local tBest
+	local function tConsider(aData)
+		if type(aData) ~= "table" or type(aData.lines) ~= "table" then return end
+		if not tBest or #aData.lines > #tBest.lines then tBest = aData end
+	end
+	if tInfo then
+		if tInfo.GetLootRollItem and aRollID then
+			local tOk, tData = pcall(tInfo.GetLootRollItem, aRollID)
+			if tOk then tConsider(tData) end
+		end
+		if tInfo.GetHyperlink and aLink then
+			local tOk, tData = pcall(tInfo.GetHyperlink, aLink)
+			if tOk then tConsider(tData) end
+		end
+	end
+	if tBest then
+		local tOut = {}
+		for _, tLine in ipairs(tBest.lines) do
+			local tLeft, tRight = tLine.leftText, tLine.rightText
+			if type(tLeft) == "string" and not Sku.IsSecret(tLeft) and tLeft ~= "" and not string.find(tLeft, "Open Issue Report", 1, true) then
+				if type(tRight) == "string" and not Sku.IsSecret(tRight) and tRight ~= "" then tLeft = tLeft.." "..tRight end
+				tOut[#tOut + 1] = tLeft
+			end
+		end
+		if #tOut > 0 then return SkuUtil:Unescape(table.concat(tOut, "\r\n")) end
+	end
+	-- Ersatz: Scan-Tooltip (geschuetzt)
+	if aLink then
+		local tText
+		pcall(function()
+			SkuUtil:ResetScanningTooltip()
+			SkuScanningTooltip:SetHyperlink(aLink)
+			local tRaw = TooltipLines_helper(SkuScanningTooltip:GetRegions())
+			if tRaw ~= "asd" and tRaw ~= "" then tText = SkuUtil:Unescape(tRaw) end
+		end)
+		return tText
+	end
+	return nil
+end
+
+function SkuOptions:CONFIRM_LOOT_ROLL(aEvent, aRollID, aRollType)
+	local tPending = SkuOptions.pendingRollConfirm
+	if tPending and tPending.id == aRollID and GetTime() - tPending.t < 10 then
+		pcall(ConfirmLootRoll, aRollID, aRollType or tPending.type)
+	end
+end
+
+function SkuOptions:START_LOOT_ROLL(...)
+	-- AceEvent: erster Parameter ist der Ereignisname
+	local tArgs = { ... }
+	if type(tArgs[1]) == "string" then table.remove(tArgs, 1) end
+	local tRollID = tArgs[1]
+	if not tRollID then return end
+	SkuOptions.activeRollIDs[tRollID] = GetTime()
+	SkuOptions.rolledIDs[tRollID] = nil
+	SkuOptions:AnnounceRoll(tRollID, 0)
+end
+
+function SkuOptions:CANCEL_LOOT_ROLL(...)
+	local tArgs = { ... }
+	if type(tArgs[1]) == "string" then table.remove(tArgs, 1) end
+	local tRollID = tArgs[1]
+	if tRollID then
+		SkuOptions.activeRollIDs[tRollID] = nil
+		SkuOptions.rolledIDs[tRollID] = nil
+	end
+end
+
+function SkuOptions:LOOT_SLOT_CHANGED()
+	-- bewusst leer: gehoert zum normalen Beutefenster, nicht zum Wuerfeln (frueher fiel hier eine Wuerfel-Ansage samt print an)
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -7335,6 +7496,23 @@ local function SkuIterateGossipList(aGossipListTable, aParentMenuTable, aTab)
 					if tOkLazy and type(tLazy) == "table" then tChilds = tLazy end
 				end
 				SkuIterateGossipList(tChilds, self, aTab.."  ")
+			end
+
+			-- Eintrag mit Untermenue UND eigener Aktion (click + func): Enter fuehrt die Aktion aus, Pfeil rechts oeffnet das Untermenue,
+			-- genau wie bei den Taschengegenstaenden (isClickItem -> OnLeftAction). Ohne das ging bei Eintraegen mit Unterpunkten
+			-- ein Enter nur hinein und die Aktion (z. B. Kaufen beim Haendler) war nicht erreichbar.
+			if aGossipListTable[index].click == true and aGossipListTable[index].func then
+				tNewMenuEntry.isClickItem = true
+				tNewMenuEntry.OnLeftAction = function()
+					local tOkL, tErrL = pcall(aGossipListTable[index].func, aGossipListTable[index].obj, "LeftButton")
+					if not tOkL and SkuErrorLog and SkuErrorLog.Log then SkuErrorLog:Log("clickWithChildren", tostring(tErrL or "unknown")) end
+					-- stayInPlace: stiller Neuaufbau, der Fokus bleibt auf dem Eintrag (der Pfad nutzt die menuId)
+					if aGossipListTable[index].stayInPlace == true then
+						pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+					else
+						pcall(function() SkuCore:CheckFrames() end)
+					end
+				end
 			end
 		end
 

@@ -586,6 +586,19 @@ local function getEquippedItemTooltipText(invSlot)
 				end
 			end
 			if #tOut > 0 then
+				-- Das angelegte Stueck bekam im Vergleich bisher weder Gegenstandsstufe noch Qualitaet, nur das Taschenstueck
+				-- (Lena, 10.10.2026): beides wie beim Taschen-Tooltip aus dem Link des angelegten Gegenstands ergaenzen.
+				local tLink = _G.GetInventoryItemLink and _G.GetInventoryItemLink("player", invSlot)
+				if type(tLink) == "string" and tLink ~= "" then
+					local tQuality = SkuUtil:ItemQualityString(tLink)
+					if tQuality and SkuSettings:Sub("SkuCore").itemSettings.ShowItemQality == true then
+						tOut[1] = tOut[1].." ("..tQuality..")"
+					end
+					local tILvl = SkuUtil:ItemLevel(tLink)
+					if tILvl then
+						table.insert(tOut, 2, L["Item Level"]..": "..tILvl)
+					end
+				end
 				return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
 			end
 		end
@@ -4321,6 +4334,41 @@ end
 -- laeuft Sku nicht mit: ein Post-Hook auf ClassTrainer_SetSelection sagt die Auswahl an und baut das Menue neu.
 local tTrainerLastBuiltSelection
 local tTrainerSelectionHooked
+
+-- Stiller Neuaufbau des Menues. Er parkt den Fokus kurz auf dem ersten Eintrag (Lehrername) und liest ihn vor:
+-- die Ansagesperre verschluckt das, danach wird die gemerkte Zeile zurueckgestellt.
+local function tTrainerRebuildKeepFocus()
+	local tCur = SkuOptions and SkuOptions.currentMenuPosition
+	local tParent = tCur and tCur.parent
+	local tParentKey, tIndex
+	if tParent and tParent.children then
+		tParentKey = tParent.id or tParent.name
+		for x = 1, #tParent.children do
+			if tParent.children[x] == tCur then tIndex = x break end
+		end
+	end
+	-- Der Neuaufbau parkt den Fokus kurz auf dem ersten Eintrag (Lehrername) und liest ihn dabei vor. Die Ansagesperre
+	-- (wie beim Taschen-Neuaufbau) verschluckt diese Zwischenansage; die Auswahl sagt tTrainerSay selbst an.
+	if Sku then Sku.tBagAnnounceSuppress = GetTime() + 0.9 end
+	pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+	-- Nur zurueckstellen, wenn der Fokus auf den ersten Eintrag gesprungen ist und wir noch in derselben Liste stehen.
+	if tIndex and tIndex > 1 and _G.C_Timer and _G.C_Timer.After then
+		local function tRestore(aTag)
+			local tNow = SkuOptions.currentMenuPosition
+			local tNowParent = tNow and tNow.parent
+			if tNowParent and tNowParent.children and (tNowParent.id or tNowParent.name) == tParentKey then
+				local tTarget = tNowParent.children[tIndex]
+				if tTarget and tTarget ~= tNow and tNow == tNowParent.children[1] then
+					SkuOptions.currentMenuPosition = tTarget
+				end
+			end
+		end
+		_G.C_Timer.After(0.1, function() tRestore("0.1") end)
+		_G.C_Timer.After(0.3, function() tRestore("0.3") end)
+		_G.C_Timer.After(0.8, function() tRestore("0.8") end)
+	end
+end
+
 local function tTrainerHookSelection()
 	if tTrainerSelectionHooked or not _G.ClassTrainer_SetSelection then return end
 	tTrainerSelectionHooked = true
@@ -4328,17 +4376,42 @@ local function tTrainerHookSelection()
 		C_Timer.After(0.2, function()
 			local tFrame = _G["ClassTrainerFrame"]
 			if not (tFrame and tFrame:IsVisible() == true) then return end
-			local tIdx = tTrainerSelectedIndex()
-			-- nur bei echtem Wechsel nach dem ersten Aufbau (Blizzards Vorauswahl beim Oeffnen bleibt still)
-			if tIdx and tTrainerLastBuiltSelection and tIdx ~= tTrainerLastBuiltSelection then
-				local tOk, tName = pcall(_G.GetTrainerServiceInfo, tIdx)
-				if tOk and tName then
-					tTrainerSay(tName.." "..Sku.deEn("ausgewählt. Zum Lernen den Eintrag Lernen am Ende wählen",
-						"selected. Choose Learn at the end of the list to train it",
-						"sélectionné. Choisissez Apprendre en fin de liste"))
+				local tIdx = tTrainerSelectedIndex()
+				-- nur bei echtem Wechsel nach dem ersten Aufbau (Blizzards Vorauswahl beim Oeffnen bleibt still)
+				local tChanged = tIdx and tIdx ~= tTrainerLastBuiltSelection and SkuCore.trainerOpenAt and GetTime() - SkuCore.trainerOpenAt > 1.5
+				tTrainerRebuildKeepFocus()
+				if tChanged then
+					-- Nach dem Auswaehlen springt der Fokus auf den Eintrag "Lernen: <Fertigkeit>" und liest ihn vor.
+					-- Gibt es ihn nicht (nicht lernbar), sagt die Auswahl nur den Namen an.
+					local function tFocusLearn(aLast)
+						local tFrame2 = _G["ClassTrainerFrame"]
+						if not (tFrame2 and tFrame2:IsVisible() == true) then return end
+						local tLabel = SkuCore.trainerLearnLabel
+						local tNow = SkuOptions.currentMenuPosition
+						local tList = tNow and tNow.parent and tNow.parent.children
+						local tHit
+						if tLabel and tList then
+							for _, tChild in ipairs(tList) do
+								if tChild.name == tLabel or (type(tChild.name) == "string" and tChild.name:find(tLabel, 1, true)) then tHit = tChild break end
+							end
+						end
+						if tHit then
+							SkuOptions.currentMenuPosition = tHit
+							-- OnEnter richtet die sichere Enter-Belegung fuer den Eintrag ein (sonst tut Enter nichts)
+							if tHit.OnEnter then pcall(function() tHit:OnEnter() end) end
+							if Sku then Sku.tBagAnnounceSuppress = nil end
+							pcall(function() SkuOptions:VocalizeCurrentMenuName() end)
+						elseif not aLast then
+							C_Timer.After(0.4, function() tFocusLearn(true) end)
+						else
+							local tOk, tName = pcall(_G.GetTrainerServiceInfo, tIdx)
+							if tOk and tName then
+								tTrainerSay(tName.." "..Sku.deEn("ausgew\195\164hlt", "selected", "s\195\169lectionn\195\169"))
+							end
+						end
+					end
+					C_Timer.After(0.35, function() tFocusLearn(false) end)
 				end
-			end
-			pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
 		end)
 	end)
 end
@@ -4385,7 +4458,7 @@ local function tTrainerVerify(aIndex, aName, aIsPet, aCost, aPointsBefore, aMone
 		end
 		dprint("trainerBuy", "result", tostring(aLearned), tostring(tTrainerLastError))
 		if _G["ClassTrainerFrame"] and _G["ClassTrainerFrame"]:IsVisible() == true then
-			pcall(function() SkuCore:CheckFrames(nil, nil, true) end)
+			tTrainerRebuildKeepFocus()
 		end
 	end
 
@@ -4465,6 +4538,12 @@ function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 		local tOkNum, tNum = pcall(_G.GetNumTrainerServices)
 		tNum = (tOkNum and tonumber(tNum)) or 0
 		local tSelectedIndex = tTrainerSelectedIndex()
+		SkuCore.trainerLearnLabel = nil
+		if not SkuCore.trainerOpenAt then SkuCore.trainerOpenAt = GetTime() end
+		if _G["ClassTrainerFrame"] and not _G["ClassTrainerFrame"].skuOnHideHooked then
+			_G["ClassTrainerFrame"].skuOnHideHooked = true
+			_G["ClassTrainerFrame"]:HookScript("OnHide", function() SkuCore.trainerOpenAt = nil end)
+		end
 		tTrainerHookSelection()
 		tTrainerLastBuiltSelection = tSelectedIndex
 		for i = 1, tNum do
@@ -4536,6 +4615,8 @@ function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 				if tRow then
 					-- Auswaehlen = sicherer Klick auf Blizzards Zeile (Lernen folgt mit dem Eintrag "Lernen" unten).
 					tEntry.directAction = true
+					-- Fokus bleibt auf der Zeile: ohne stayInPlace springt das Menue nach der Aktion zum Eltern-Eintrag (Lehrername).
+					tEntry.stayInPlace = true
 					tEntry.noMenuNumbers = true
 					-- Der sichere "click"-Weg reicht den Namen der Menue-Taste ("ENTER") an die Zeile weiter, Blizzards Zeile
 					-- reagiert aber nur auf "LeftButton". Deshalb die Taste direkt an die Zeile binden (directClickButton, wie
@@ -4574,6 +4655,7 @@ function SkuCore:Build_ClassTrainerFrame(aParentChilds)
 				local tPointsBefore = tIsPet and tTrainerPetPoints() or nil
 				local tMoneyBefore = _G.GetMoney and GetMoney() or nil
 				local tSelIndex = tSelectedIndex
+				SkuCore.trainerLearnLabel = tLearnLabel
 				table.insert(aParentChilds, tLearnLabel)
 				aParentChilds[tLearnLabel] = {
 					frameName = "ClassTrainerTrainButton",
@@ -7549,6 +7631,293 @@ end
 
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+-- Haendler: Kaufen mit waehlbarer Menge, Pruefung vorher, Rueckmeldung nachher (WoW Forever).
+--
+-- Vorher rief ein Enter nur BuyMerchantItem(index) ohne jede Pruefung: immer genau eine Packung, keine Rueckmeldung ob es geklappt
+-- hat (Geld, volle Taschen, ausverkauft), und teure Waren (ab 150 Gold) oder Tauschwaren wurden ohne die Rueckfrage gekauft, die
+-- Blizzards Fenster dafuer zeigt. Jetzt: Menge je Ware merkbar (Einstellung "Menge einstellen" im Untermenue, Pfeil rechts), Pruefung
+-- auf Geld/Vorrat/Tauschware, Rueckfrage bei teuren Waren, Kauf in Teilen bis zur Obergrenze je Aufruf (GetMerchantItemMaxStack), und
+-- nach dem Kauf die wirkliche Anzahl und der bezahlte Preis aus Taschenbestand und Geld.
+-- Mengen zaehlen in STUECKEN wie bei Blizzards Mengenfenster; bei Waren, die in Packungen verkauft werden (z. B. 5 Stueck), immer
+-- in vollen Packungen.
+---------------------------------------------------------------------------------------------------------------------------------------
+local MERCHANT_HIGH_PRICE_COST = 1500000 -- wie Blizzards MERCHANT_HIGH_PRICE_COST: ab 150 Gold fragt das Fenster nach
+
+local function tMerchSay(aText)
+	pcall(function() SkuOptions.Voice:OutputStringBTtts(aText, true, true, 0.2, nil, nil, nil, 2) end)
+end
+
+local function tMerchCoin(aCopper)
+	local tOk, tText = pcall(SkuGetCoinText, aCopper, true)
+	return tOk and tText or tostring(aCopper)
+end
+
+-- gemerkte Kaufmengen je Ware (kontoweit)
+local function tMerchantAmounts()
+	local tG = SkuSettings:Sub("SkuCore", nil, "global")
+	tG.merchantBuyAmounts = tG.merchantBuyAmounts or {}
+	return tG.merchantBuyAmounts
+end
+
+local function tMerchantKey(aInfo)
+	return aInfo.itemID or aInfo.name
+end
+
+local function tMerchItemCount(aLink)
+	if type(aLink) ~= "string" then return 0 end
+	local tFn = (_G.C_Item and _G.C_Item.GetItemCount) or _G.GetItemCount
+	if not tFn then return 0 end
+	local tOk, tN = pcall(tFn, aLink, false, false, true)
+	return (tOk and tonumber(tN)) or 0
+end
+
+-- Daten einer Ware frisch lesen (Preis, Packungsgroesse, Vorrat); die alte Tabellenform und die neue (C_MerchantFrame) werden beide verstanden.
+local function tWareInfo(aIndex)
+	local t = {}
+	if _G.GetMerchantItemInfo then
+		local r = { pcall(_G.GetMerchantItemInfo, aIndex) }
+		if r[1] and type(r[2]) == "string" then
+			t.name, t.price, t.quantity, t.available, t.usable, t.extended = r[2], r[4], r[5], r[6], r[7], r[8]
+		elseif r[1] and type(r[2]) == "table" then
+			local x = r[2]
+			t.name, t.price, t.quantity, t.available, t.usable, t.extended = x.name, x.price, x.stackCount, x.numAvailable, x.isUsable, x.hasExtendedCost
+		end
+	end
+	if not t.name and _G.C_MerchantFrame and _G.C_MerchantFrame.GetItemInfo then
+		local tOk, x = pcall(_G.C_MerchantFrame.GetItemInfo, aIndex)
+		if tOk and type(x) == "table" then
+			t.name, t.price, t.quantity, t.available, t.usable, t.extended = x.name, x.price, x.stackCount, x.numAvailable, x.isUsable, x.hasExtendedCost
+		end
+	end
+	if _G.GetMerchantItemLink then
+		local tOk, l = pcall(_G.GetMerchantItemLink, aIndex)
+		if tOk then t.link = l end
+	end
+	if not t.name and type(t.link) == "string" then t.name = string.match(t.link, "%[(.-)%]") end
+	t.quantity = tonumber(t.quantity) or 1
+	if t.quantity < 1 then t.quantity = 1 end
+	t.price = tonumber(t.price) or 0
+	t.itemID = type(t.link) == "string" and tonumber(string.match(t.link, "item:(%d+)")) or nil
+	return t
+end
+
+-- Tauschware: Kostentext und wie viele Packungen man sich mit den vorhandenen Gegenstaenden leisten kann (nil = unbekannt, z. B. Waehrungen).
+local function tExtendedCost(aIndex, aStack)
+	local tParts, tAfford = {}, nil
+	if _G.GetMerchantItemCostInfo and _G.GetMerchantItemCostItem then
+		local tOkN, tN = pcall(_G.GetMerchantItemCostInfo, aIndex)
+		tN = tOkN and tonumber(tN) or 0
+		for i = 1, tN do
+			local tOk, _, tValue, tLink, tCurrency = pcall(_G.GetMerchantItemCostItem, aIndex, i)
+			if tOk and tValue then
+				local tName = tCurrency or (type(tLink) == "string" and string.match(tLink, "%[(.-)%]")) or "?"
+				tParts[#tParts + 1] = tValue.." "..tName
+				if tLink and not tCurrency then
+					local tHave = tMerchItemCount(tLink)
+					local tCan = math.floor(tHave / (tValue / aStack))
+					tAfford = tAfford and math.min(tAfford, tCan) or tCan
+				end
+			end
+		end
+	end
+	return table.concat(tParts, ", "), tAfford
+end
+
+-- Platz in den normalen Taschen fuer diese Ware, in Stuecken: freie Plaetze mal Stapelgroesse plus das, was auf einen angebrochenen
+-- Stapel noch draufpasst. nil = unbekannt (dann nicht begrenzen). Spezialtaschen zaehlen nicht mit (nur Familie 0).
+local function tBagRoom(aLink, aStackSize)
+	local tFn = _G.C_Container and _G.C_Container.GetContainerNumFreeSlots
+	if not tFn or type(aStackSize) ~= "number" or aStackSize < 1 then return nil end
+	local tFree = 0
+	for tBag = 0, 4 do
+		local tOk, tN, tFamily = pcall(tFn, tBag)
+		if tOk and type(tN) == "number" and (tFamily == nil or tFamily == 0) then tFree = tFree + tN end
+	end
+	local tHave = tMerchItemCount(aLink)
+	local tTop = (aStackSize - (tHave % aStackSize)) % aStackSize
+	return tFree * aStackSize + tTop
+end
+
+-- Hoechstmenge in Stuecken, die man sich jetzt leisten kann, die der Vorrat hergibt und die in die Taschen passt (immer volle Packungen).
+-- Zweiter Rueckgabewert: true, wenn der Taschenplatz die Grenze setzt.
+local function tMaxAffordable(aIndex, aInfo)
+	local tCan = 100000
+	if aInfo.price > 0 then
+		tCan = math.floor((_G.GetMoney and _G.GetMoney() or 0) / (aInfo.price / aInfo.quantity))
+	end
+	if aInfo.extended then
+		local _, tA = tExtendedCost(aIndex, aInfo.quantity)
+		if tA then tCan = math.min(tCan, tA) end
+	end
+	-- Vorrat: numAvailable zaehlt Packungen (-1 = unbegrenzt)
+	if type(aInfo.available) == "number" and aInfo.available >= 0 then
+		tCan = math.min(tCan, aInfo.available * aInfo.quantity)
+	end
+	local tRoomLimited = false
+	local tStackSize = 0
+	if _G.GetMerchantItemMaxStack then
+		local tOkM, tM = pcall(_G.GetMerchantItemMaxStack, aIndex)
+		if tOkM then tStackSize = tonumber(tM) or 0 end
+	end
+	local tRoom = tBagRoom(aInfo.link, (tStackSize > 0) and tStackSize or aInfo.quantity)
+	if tRoom and tRoom < tCan then tCan = tRoom; tRoomLimited = true end
+	return math.max(0, math.floor(tCan / aInfo.quantity) * aInfo.quantity), tRoomLimited
+end
+
+local tMerchErrFrame, tMerchErrLast
+local function tMerchErrStart()
+	tMerchErrLast = nil
+	if not tMerchErrFrame then
+		tMerchErrFrame = CreateFrame("Frame")
+		tMerchErrFrame:SetScript("OnEvent", function(_, _, aType, aMsg)
+			local tM = (type(aMsg) == "string" and aMsg) or (type(aType) == "string" and aType) or nil
+			if tM then tMerchErrLast = tM end
+		end)
+	end
+	pcall(tMerchErrFrame.RegisterEvent, tMerchErrFrame, "UI_ERROR_MESSAGE")
+end
+local function tMerchErrStop()
+	if tMerchErrFrame then pcall(tMerchErrFrame.UnregisterEvent, tMerchErrFrame, "UI_ERROR_MESSAGE") end
+end
+
+-- Kaufen. aWanted = gewuenschte Stuecke (nil = eine Packung). Alles Weitere (Geld, Vorrat, Rueckfrage, Ergebnis) regelt die Funktion.
+function SkuCore:MerchantBuy(aIndex, aWanted)
+	local tInfo = tWareInfo(aIndex)
+	if not tInfo.name then
+		tMerchSay(Sku.deEn("Diese Ware gibt es nicht mehr.", "This item is no longer for sale.", "Cet article n'est plus en vente."))
+		return
+	end
+	local tStack = tInfo.quantity
+	local tMaxStack = 0
+	if _G.GetMerchantItemMaxStack then
+		local tOk, tM = pcall(_G.GetMerchantItemMaxStack, aIndex)
+		if tOk then tMaxStack = tonumber(tM) or 0 end
+	end
+	if tMaxStack < tStack then tMaxStack = tStack end
+
+	local tAmount = math.max(tStack, math.ceil((tonumber(aWanted) or tStack) / tStack) * tStack)
+	local tPossible, tRoomLimited = tMaxAffordable(aIndex, tInfo)
+	if tPossible < tStack then
+		if tRoomLimited then
+			tMerchSay(tInfo.name..": "..Sku.deEn("nicht genug Platz in den Taschen", "not enough bag space", "pas assez de place dans les sacs"))
+		elseif type(tInfo.available) == "number" and tInfo.available == 0 then
+			tMerchSay(tInfo.name..": "..Sku.deEn("ausverkauft", "sold out", "épuisé"))
+		else
+			tMerchSay(tInfo.name..": "..(tInfo.extended and Sku.deEn("nicht genug Tauschware", "not enough materials", "pas assez de marchandises d'échange")
+				or Sku.deEn("nicht genug Geld", "not enough money", "pas assez d'argent")))
+		end
+		return
+	end
+	local tNote = ""
+	if tAmount > tPossible then
+		tAmount = tPossible
+		tNote = (tRoomLimited and Sku.deEn("Nur so viel passt in die Taschen: ", "Only this many fit in your bags: ", "Seulement ceci tient dans les sacs : ")
+			or Sku.deEn("Nur so viel möglich: ", "Only this many possible: ", "Seulement possible : "))..tAmount..". "
+	end
+
+	local tTotal = tInfo.price * (tAmount / tStack)
+	local tExtText = tInfo.extended and tExtendedCost(aIndex, tStack) or ""
+	local tCostText = (tExtText ~= "") and tExtText or ((tTotal > 0) and tMerchCoin(tTotal) or "")
+
+	local function tDoBuy()
+		local tCountBefore, tMoneyBefore = tMerchItemCount(tInfo.link), (_G.GetMoney and _G.GetMoney() or 0)
+		tMerchErrStart()
+		local tRemaining, tCalls = tAmount, 0
+		while tRemaining > 0 and tCalls < 60 do
+			local tChunk = math.max(tStack, math.floor(math.min(tRemaining, tMaxStack) / tStack) * tStack)
+			if tChunk == tStack then pcall(_G.BuyMerchantItem, aIndex) else pcall(_G.BuyMerchantItem, aIndex, tChunk) end
+			tRemaining = tRemaining - tChunk
+			tCalls = tCalls + 1
+		end
+		dprint("merchantBuy", "gesendet", tInfo.name, "stueck", tAmount, "calls", tCalls)
+		-- Ergebnis aus Bestand und Geld pruefen; erst dann etwas sagen
+		C_Timer.After(1.0, function()
+			tMerchErrStop()
+			local tGained = tMerchItemCount(tInfo.link) - tCountBefore
+			local tSpent = tMoneyBefore - (_G.GetMoney and _G.GetMoney() or 0)
+			dprint("merchantBuy", "ergebnis", tInfo.name, "gewollt", tAmount, "erhalten", tGained, "bezahlt", tSpent, "fehler", tostring(tMerchErrLast))
+			if tGained >= tAmount or (tGained <= 0 and tSpent > 0 and not tInfo.link) then
+				pcall(function() SkuOptions.Voice:OutputStringBTtts("sound-notification24", false, true) end)
+				local tTxt = Sku.deEn("Gekauft", "Bought", "Acheté")..": "..tAmount.." x "..tInfo.name
+				if tSpent > 0 then tTxt = tTxt..", "..tMerchCoin(tSpent) end
+				tMerchSay(tNote..tTxt)
+			elseif tGained > 0 then
+				tMerchSay(Sku.deEn("Nur ", "Only ", "Seulement ")..tGained..Sku.deEn(" von ", " of ", " sur ")..tAmount.." x "..tInfo.name..Sku.deEn(" gekauft", " bought", " acheté")
+					..(tMerchErrLast and (". "..tMerchErrLast) or ""))
+			else
+				tMerchSay(tInfo.name..": "..Sku.deEn("nichts gekauft", "nothing bought", "rien acheté")..(tMerchErrLast and (". "..tMerchErrLast) or ""))
+			end
+		end)
+	end
+
+	-- Rueckfrage wie in Blizzards Fenster: Tauschwaren und teure Waren
+	if tInfo.extended or tTotal >= MERCHANT_HIGH_PRICE_COST then
+		local tAsk = Sku.deEn("Wirklich kaufen? ", "Really buy? ", "Vraiment acheter ? ")..tAmount.." x "..tInfo.name
+			..((tCostText ~= "") and (", "..tCostText) or "")..Sku.deEn(". Eingabe Ja, Escape Nein.", ". Type Yes, Escape for No.", ". Tapez Oui, Échap pour Non.")
+		if not SkuCore.ConfirmButtonShow then tDoBuy() return end
+		if _G.PlaySound then PlaySound(88) end
+		C_Timer.After(0.5, function()
+			SkuCore:ConfirmButtonShow(tAsk,
+				function()
+					if _G.PlaySound then PlaySound(89) end
+					tDoBuy()
+				end,
+				function()
+					tMerchSay(Sku.deEn("Abgebrochen", "Canceled", "Annulé"))
+				end)
+			pcall(function() SkuOptions.Voice:OutputStringBTtts(tAsk, true, true, 0.1, nil, nil, nil, 2) end)
+		end)
+		return
+	end
+	tDoBuy()
+end
+
+-- Menge per Eingabefeld abfragen. aMode "buy": die eingegebene Menge sofort kaufen (einmalig, wird nicht gemerkt).
+-- aMode "save": als Kaufmenge dieser Ware merken (kontoweit); Enter auf die Ware kauft dann diese Menge.
+-- Leere/ungueltige Eingabe: bei "save" zurueck auf eine Packung, bei "buy" Abbruch.
+-- Waren, die in Packungen verkauft werden (z. B. Pfeile zu 200), kann man nur packungsweise kaufen: dort zaehlt die Eingabe PACKUNGEN
+-- (vorher wurde "2" still auf eine ganze Packung aufgerundet). Intern wird weiter in Stuecken gerechnet.
+function SkuCore:MerchantPromptAmount(aIndex, aMode)
+	local tInfo = tWareInfo(aIndex)
+	if not tInfo.name then return end
+	local tKey = tMerchantKey(tInfo)
+	local tStack = tInfo.quantity
+	local tCurItems = tMerchantAmounts()[tKey] or tStack
+	local tPacked = tStack > 1
+	local tCurShown = tPacked and math.floor(tCurItems / tStack) or tCurItems
+	local tUnit = tPacked and Sku.deEn(" Packungen zu "..tStack.." Stück", " packs of "..tStack, " lots de "..tStack) or ""
+	if _G.PlaySound then PlaySound(88) end
+	local tPrompt
+	if aMode == "buy" then
+		tPrompt = Sku.deEn("Menge eingeben", "Enter amount", "Saisir la quantité")..tUnit..Sku.deEn(", mit Eingabe kaufen", ", press Enter to buy", ", Entrée pour acheter")
+	else
+		tPrompt = Sku.deEn("Kaufmenge eingeben", "Enter buy amount", "Saisir la quantité")..tUnit..Sku.deEn(", bisher ", ", currently ", ", actuellement ")..tCurShown
+	end
+	pcall(function() SkuOptions.Voice:OutputStringBTtts(tPrompt, false, true, 0.2) end)
+	SkuOptions:EditBoxShow(tostring(tCurShown), function()
+		if _G.PlaySound then PlaySound(89) end
+		local tN = math.floor(tonumber(SkuOptionsEditBoxEditBox:GetText() or "") or 0)
+		local tItems = tPacked and (tN * tStack) or tN
+		if aMode == "buy" then
+			if tN < 1 then
+				tMerchSay(Sku.deEn("Abgebrochen", "Canceled", "Annulé"))
+			else
+				-- ein Tick Abstand: das Eingabefeld ist erst beim Rueckkehren zum Menue ganz geschlossen
+				C_Timer.After(0.2, function() SkuCore:MerchantBuy(aIndex, tItems) end)
+			end
+			return
+		end
+		if tN < 1 then
+			tMerchantAmounts()[tKey] = nil
+			tMerchSay(tInfo.name..": "..Sku.deEn("Kaufmenge zurückgesetzt auf ", "buy amount reset to ", "quantité remise à ")..tStack)
+		else
+			tMerchantAmounts()[tKey] = tItems
+			tMerchSay(tInfo.name..": "..Sku.deEn("Kaufmenge ", "buy amount ", "quantité ")..tItems..(tPacked and (" ("..tN..tUnit..")") or ""))
+		end
+	end)
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
 -- Merchant window, built from the merchant API (WoW Forever/Camelot: the generic frame scan found
 -- no readable item tooltips there -- the scanning tooltip has no SetMerchantItem any more).
 -- Three parts: "Waren" (what the vendor sells), "Rückkauf" (buy back) and, where the vendor can,
@@ -7693,10 +8062,56 @@ function SkuCore:Build_MerchantFrame(aParentChilds)
 				tFull[#tFull + 1] = Sku.deEn("Preis", "Price", "Prix")..": "..tCoin(tPrice)
 			end
 			local tIndex = i
-			tAddChild(tWares, tEntry(tLabel, tFull, function()
-				pcall(_G.BuyMerchantItem, tIndex)
-				pcall(function() SkuOptions.Voice:OutputStringBTtts("sound-notification24", false, true) end)
-			end))
+			-- Kaufmenge: gemerkter Wert je Ware (Stuecke), sonst eine Packung. Kaufen, Pruefung und Rueckmeldung: SkuCore:MerchantBuy.
+			-- Enter = sofort kaufen (gemerkte Menge), Pfeil rechts = Untermenue (Menge eingeben und kaufen, Menge merken, Stapel, Maximum).
+			-- menuId: der Name der Ware enthaelt Kommas (Preis) und liesse sich im Menuepfad nicht wiederfinden; ohne feste Kennung
+			-- sprang der Fokus nach jeder Aktion zur ersten Ware der Liste.
+			local tWareStack = (tQuantity and tQuantity > 1) and tQuantity or 1
+			local tWareKey = (type(tLink) == "string" and tonumber(string.match(tLink, "item:(%d+)"))) or tName
+			local tSavedAmount = tMerchantAmounts()[tWareKey]
+			if tSavedAmount and tSavedAmount ~= tWareStack then
+				tLabel = tLabel.." "..Sku.deEn("Kaufmenge ", "buy amount ", "quantité ")..tSavedAmount
+			end
+			local tWareNode = tEntry(tLabel, tFull, function()
+				SkuCore:MerchantBuy(tIndex, tMerchantAmounts()[tWareKey])
+			end)
+			tWareNode.stayInPlace = true
+			tWareNode.menuId = "merchantware"..tIndex
+
+			local tBuyNode = tEntry(Sku.deEn("Menge eingeben und kaufen", "Enter amount and buy", "Saisir la quantité et acheter"), "", function()
+				SkuCore:MerchantPromptAmount(tIndex, "buy")
+			end)
+			tBuyNode.stayInPlace = true
+			tAddChild(tWareNode, tBuyNode)
+
+			local tSetNode = tEntry(Sku.deEn("Kaufmenge merken", "Remember buy amount", "Mémoriser la quantité"), "", function()
+				SkuCore:MerchantPromptAmount(tIndex, "save")
+			end)
+			tSetNode.stayInPlace = true
+			tAddChild(tWareNode, tSetNode)
+
+			local tWareInfoNow = tWareInfo(tIndex)
+			local tPossibleNow = tMaxAffordable(tIndex, tWareInfoNow)
+			local tMaxStackNow = 0
+			if _G.GetMerchantItemMaxStack then
+				local tOkM, tM = pcall(_G.GetMerchantItemMaxStack, tIndex)
+				if tOkM then tMaxStackNow = tonumber(tM) or 0 end
+			end
+			if tMaxStackNow > tWareStack and tPossibleNow >= tMaxStackNow then
+				local tStackNode = tEntry(Sku.deEn("Ganzen Stapel kaufen: ", "Buy a full stack: ", "Acheter une pile entière : ")..tMaxStackNow, "", function()
+					SkuCore:MerchantBuy(tIndex, tMaxStackNow)
+				end)
+				tStackNode.stayInPlace = true
+				tAddChild(tWareNode, tStackNode)
+			end
+			if tPossibleNow > tWareStack and tPossibleNow ~= tMaxStackNow then
+				local tAllNode = tEntry(Sku.deEn("Alles kaufen was ich mir leisten kann und was passt: ", "Buy as many as I can afford and fit: ", "Acheter autant que possible : ")..tPossibleNow, "", function()
+					SkuCore:MerchantBuy(tIndex, tPossibleNow)
+				end)
+				tAllNode.stayInPlace = true
+				tAddChild(tWareNode, tAllNode)
+			end
+			tAddChild(tWares, tWareNode)
 		end
 	end
 	if #tWares.childs == 0 then

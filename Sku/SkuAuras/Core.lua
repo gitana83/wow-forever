@@ -478,6 +478,7 @@ end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuAuras:GetBestUnitId(aUnitGUID)
+	if Sku.IsSecret(aUnitGUID) then return {} end   -- Forever/Instanz: geheime Kennung laesst sich nicht vergleichen
 
 	if not aUnitGUID then
 		return {}
@@ -489,7 +490,7 @@ function SkuAuras:GetBestUnitId(aUnitGUID)
 	local tUnitIds = {}
 
 	local function checkUnit(unit)
-		if aUnitGUID == UnitGUID(unit) then
+		if aUnitGUID == Sku.SafeGUID(unit) then
 			tUnitIds[#tUnitIds + 1] = unit
 		end
 	end
@@ -1601,7 +1602,7 @@ function SkuAuras:UNIT_TICKER(aUnitId)
 			SkuAuras.UnitRepo[tUnitId].unitPower = tPower
 		end
 
-		local unitTargetGUID = UnitGUID(tUnitId.."target")
+		local unitTargetGUID = Sku.SafeGUID(tUnitId.."target")
 		if SkuAuras.UnitRepo[tUnitId].unitTargetName ~= unitTargetGUID then
 			SkuAuras.UnitRepo[tUnitId].unitTargetName = unitTargetGUID
 
@@ -2723,11 +2724,11 @@ function SkuAuras:EvaluateAllAuras(tEventData, tSpecificAuraToTestIndex, aRequir
 			-- [v43.0] Stamp the frame time per unit: the membership-diff drain uses
 			-- it to skip its extra evaluation when an _AURA_ combat-log pass already
 			-- ran for that unit this same frame (see tLastAuraCleuEvalTime).
-			if tDestGuid == UnitGUID("player") then
+			if not Sku.IsSecret(tDestGuid) and tDestGuid == Sku.SafeGUID("player") then
 				SkuAuras:InvalidateAuraListCache("player")
 				tLastAuraCleuEvalTime.player = GetTime()
 			end
-			if tDestGuid == UnitGUID("target") then
+			if not Sku.IsSecret(tDestGuid) and tDestGuid ~= nil and tDestGuid == Sku.SafeGUID("target") then
 				SkuAuras:InvalidateAuraListCache("target")
 				tLastAuraCleuEvalTime.target = GetTime()
 			end

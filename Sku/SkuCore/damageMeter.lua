@@ -186,9 +186,121 @@ local function BuildCombatTooltip(aCombat, aName, aAll)
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+-- [Forever] Eingebauter Schadensmesser des Spiels (C_DamageMeter). Wird genutzt, wenn das Addon Details nicht da ist.
+-- Im Kampf liefert die API "geheime" Werte, die Sku nicht lesen darf: dann steht ein Hinweis statt der Zahlen.
+local function tDmSecret(aValue)
+   return Sku.IsSecret(aValue)
+end
+
+local function tDmFormat(aNumber)
+   if type(aNumber) ~= "number" or tDmSecret(aNumber) then return nil end
+   return tostring(math.floor(aNumber + 0.5))
+end
+
+-- aFetch(aMeterType) -> Sitzungstabelle; baut die Rangliste einer Wertung.
+local function tDmRanking(aHeader, aMeterType, aFetch, aWithRate, aRateLabel)
+   local tOk, tSession = pcall(aFetch, aMeterType)
+   if not tOk or type(tSession) ~= "table" or tDmSecret(tSession) then
+      return aHeader..": "..Sku.deEn("im Kampf nicht lesbar", "not readable in combat", "illisible en combat")
+   end
+   local tSources = tSession.combatSources
+   if type(tSources) ~= "table" or tDmSecret(tSources) or #tSources == 0 then
+      return aHeader..": "..(L["no data"] or "keine Daten")
+   end
+   local tEnemy = _G.Enum and Enum.DamageMeterSourceDisplayType and Enum.DamageMeterSourceDisplayType.Enemy
+   local tText = aHeader..":"
+   local tRank = 0
+   for _, tSource in ipairs(tSources) do
+      if tSource.sourceDisplayType ~= tEnemy then
+         local tName = tSource.name
+         local tTotal = tDmFormat(tSource.totalAmount)
+         if type(tName) ~= "string" or tDmSecret(tName) or not tTotal then
+            return aHeader..": "..Sku.deEn("im Kampf nicht lesbar", "not readable in combat", "illisible en combat")
+         end
+         tRank = tRank + 1
+         local tClass = (SkuQuest and SkuQuest.classesFriendly and SkuQuest.classesFriendly[tSource.classFilename]) or ""
+         tText = tText.."\r\n"..tRank.." "..tName.." "..tClass.." "..tTotal
+         if aWithRate then
+            local tRate = tDmFormat(tSource.amountPerSecond)
+            if tRate then tText = tText.." ("..tRate.." "..aRateLabel..")" end
+         end
+      end
+   end
+   if tRank == 0 then return aHeader..": "..(L["no data"] or "keine Daten") end
+   return tText
+end
+
+local function tDmReport(aTitle, aFetch)
+   local tType = Enum.DamageMeterType
+   return {
+      aTitle,
+      tDmRanking(Sku.deEn("Schaden", "Damage", "Dégâts"), tType.DamageDone, aFetch, true, Sku.deEn("pro Sekunde", "per second", "par seconde")),
+      tDmRanking(Sku.deEn("Heilung", "Healing", "Soins"), tType.HealingDone, aFetch, true, Sku.deEn("pro Sekunde", "per second", "par seconde")),
+      tDmRanking(L["Damage taken"] or "Schaden erlitten", tType.DamageTaken, aFetch, false),
+      tDmRanking(Sku.deEn("Unterbrechungen", "Interrupts", "Interruptions"), tType.Interrupts, aFetch, false),
+   }
+end
+
+local function tDmDuration(aSeconds)
+   if type(aSeconds) ~= "number" or tDmSecret(aSeconds) or aSeconds <= 0 then return "" end
+   return " "..math.floor(aSeconds / 60)..":"..string.format("%02d", math.floor(aSeconds % 60))
+end
+
+function DamageMeter:NativeMenuBuilder()
+   -- Der Schadensmesser des Spiels zeichnet nur auf, wenn die Einstellung an ist.
+   local tCvarOk, tCvar = pcall(GetCVar, "damageMeterEnabled")
+   if tCvarOk and tCvar == "0" then
+      local tOn = SkuOptions:InjectMenuItems(self, {Sku.deEn("Schadensmesser einschalten", "Turn on damage meter", "Activer le compteur de dégâts")}, SkuGenericMenuItem)
+      tOn.isSelect = true
+      tOn.OnAction = function()
+         pcall(SetCVar, "damageMeterEnabled", "1")
+         pcall(function() SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Schadensmesser eingeschaltet", "Damage meter on", "Compteur activé"), false, true, 0.2) end)
+      end
+   end
+   local tOkAvail, tAvailable, tReason = pcall(C_DamageMeter.IsDamageMeterAvailable)
+   if tOkAvail and tAvailable ~= true then
+      SkuOptions:InjectMenuItems(self, {Sku.deEn("Schadensmesser nicht verfügbar", "Damage meter not available", "Compteur de dégâts indisponible")..": "..tostring(tReason or "")}, SkuGenericMenuItem)
+      return
+   end
+
+   local tNewMenuEntry = SkuOptions:InjectMenuItems(self, {L["Reports"]}, SkuGenericMenuItem)
+   tNewMenuEntry.id = "Reports"  -- stable anchor for the SKU_KEY_OPENDAMAGEMETER path walk
+   tNewMenuEntry.dynamic = true
+   tNewMenuEntry.BuildChildren = function(self)
+      local function tAdd(aName, aFetch)
+         local tEntry = SkuOptions:InjectMenuItems(self, {aName}, SkuGenericMenuItem)
+         tEntry.textFirstLine = aName
+         tEntry.textFull = function() return tDmReport(aName, aFetch) end
+      end
+      tAdd(L["All fights"], function(aType) return C_DamageMeter.GetCombatSessionFromType(Enum.DamageMeterSessionType.Overall, aType) end)
+      tAdd(L["Current fight"], function(aType) return C_DamageMeter.GetCombatSessionFromType(Enum.DamageMeterSessionType.Current, aType) end)
+      local tOk, tSessions = pcall(C_DamageMeter.GetAvailableCombatSessions)
+      if tOk and type(tSessions) == "table" and not tDmSecret(tSessions) then
+         for x = #tSessions, 1, -1 do
+            local tSession = tSessions[x]
+            local tName = type(tSession.name) == "string" and not tDmSecret(tSession.name) and tSession.name or L["unknown"]
+            local tID = tSession.sessionID
+            tAdd(L["Fight"].." "..x.." "..tName..tDmDuration(tSession.durationSeconds), function(aType)
+               return C_DamageMeter.GetCombatSessionFromID(tID, aType)
+            end)
+         end
+      end
+   end
+
+   local tClear = SkuOptions:InjectMenuItems(self, {L["Clear data"]}, SkuGenericMenuItem)
+   tClear.isSelect = true
+   tClear.OnAction = function()
+      pcall(C_DamageMeter.ResetAllCombatSessions)
+   end
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
 function DamageMeter:DamageMeterMenuBuilder()
    if SkuCore.DamageMeter and not SkuCore.DamageMeter:IsEnabled() then return end
    if Details == nil then
+      if _G.C_DamageMeter and _G.Enum and Enum.DamageMeterType and Enum.DamageMeterSessionType then
+         return DamageMeter.NativeMenuBuilder(self)
+      end
       SkuOptions:InjectMenuItems(self, {L["Details addon not installed"]}, SkuGenericMenuItem)
       return
    end
