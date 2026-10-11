@@ -218,17 +218,29 @@ end
 -- aSend (optional): replaces the plain SendBrowseQuery call, e.g. SearchForFavorites - the
 -- answer arrives through the same browse events and is read the same way.
 function AHF:StartBrowseQuery(aQuery, aEntry, aSend)
-	dprint("ahfDiag StartBrowseQuery", aEntry and aEntry.name, "filters", aQuery.itemClassFilters and #aQuery.itemClassFilters or 0)
+	dprint("ahfDiag StartBrowseQuery", aEntry and aEntry.name, "search=["..tostring(aQuery.searchString).."]", "filters", aQuery.itemClassFilters and #aQuery.itemClassFilters or 0)
 	gBrowse.state = "waiting"
 	gBrowse.results = {}
 	gBrowse.focusIndex = nil
 	gBrowse.entry = aEntry
+	gBrowse.searchText = (type(aQuery.searchString) == "string" and aQuery.searchString ~= "") and aQuery.searchString or nil
+	gBrowse.localFilter = nil
 	gBrowse.generation = (gBrowse.generation or 0) + 1
 	local tGen = gBrowse.generation
-	local tOk = pcall(aSend or C_AuctionHouse.SendBrowseQuery, aQuery)
-	if not tOk then
-		gBrowse.state = "done"
-		return
+	-- Das Spiel drosselt Abfragen an das Auktionshaus: wird eine Abfrage gesendet, waehrend das System nicht bereit ist, verschwindet sie
+	-- ohne jede Rueckmeldung (Lena 11.10.2026: Suche nach "Seltsamer Staub" blieb leer, im Log kein Ereignis zur zweiten Abfrage).
+	-- Dann merken wir sie und senden sie bei AUCTION_HOUSE_THROTTLED_SYSTEM_READY.
+	local tThrottleOk, tReady = pcall(C_AuctionHouse.IsThrottledMessageSystemReady)
+	dprint("ahfDiag throttle ready", tostring(tThrottleOk), tostring(tReady))
+	if tThrottleOk and tReady == false then
+		gBrowse.pendingSend = { aQuery, aSend }
+	else
+		gBrowse.pendingSend = nil
+		local tOk = pcall(aSend or C_AuctionHouse.SendBrowseQuery, aQuery)
+		if not tOk then
+			gBrowse.state = "done"
+			return
+		end
 	end
 	-- Safety net: AUCTION_HOUSE_BROWSE_FAILURE (no matches, or the query is
 	-- refused for some other server-side reason) is not always guaranteed to
@@ -237,16 +249,89 @@ function AHF:StartBrowseQuery(aQuery, aEntry, aSend)
 	-- menu stuck on "Warten" forever (confirmed live 27.09.2026 - Lena typed
 	-- a search and it never resolved). aGeneration guards against a LATE
 	-- timeout firing after a newer search already replaced this one.
-	C_Timer.After(6, function()
+	-- Diagnose: was das Spiel nach der Abfrage wirklich im Speicher hat (Treffer kommen manchmal ohne Ereignis)
+	C_Timer.After(3, function()
+		if gBrowse.generation ~= tGen then return end
+		local tOkR, tRaw = pcall(C_AuctionHouse.GetBrowseResults)
+		local tOkF, tFull = pcall(C_AuctionHouse.HasFullBrowseResults)
+		dprint("ahfDiag after 3s  results", tOkR and type(tRaw) == "table" and #tRaw or "n/a", "full", tostring(tOkF and tFull), "state", gBrowse.state)
+		-- Treffer ohne Ereignis trotzdem lesen
+		if tOkR and type(tRaw) == "table" and #tRaw > 0 and gBrowse.state == "waiting" then
+			pcall(function() AHF:RefreshBrowseResults() end)
+		end
+	end)
+	C_Timer.After(10, function()
 		if gBrowse.generation == tGen and gBrowse.state == "waiting" then
+			gBrowse.pendingSend = nil
+			if AHF:BrowseFallback() then return end
 			gBrowse.state = "done"
 			tRebuildAndFocus(gBrowse.entry)
 		end
 	end)
 end
 
+-- ---------------------------------------------------------------------
+-- FILTER (Blizzard: Filter-Menue neben der Suche). Gilt fuer Namenssuche und Kategorien, bleibt gespeichert (pro Charakter).
+-- Felder: usable, upgrades, uncollected, currentExp, exact (nur Namenssuche), minQuality (1 = beliebig .. 7), minLevel, maxLevel.
+-- ---------------------------------------------------------------------
+function AHF:GetFilter()
+	local tS = SkuSettings:Sub("SkuCore", nil, "char")
+	tS.ahfFilter = tS.ahfFilter or {}
+	return tS.ahfFilter
+end
+
+local AHF_QUALITY_FILTERS = { "PoorQuality", "CommonQuality", "UncommonQuality", "RareQuality", "EpicQuality", "LegendaryQuality", "ArtifactQuality" }
+
+-- Fuegt dem Abfrage-Table die Filter hinzu. aIsName: Namenssuche (dort wird "filters" immer gesetzt, die Suche brauchte das leere Feld).
+function AHF:ApplyFilterToQuery(aQuery, aIsName)
+	local f = AHF:GetFilter()
+	local E = _G.Enum and Enum.AuctionHouseFilter
+	local tList = {}
+	if E then
+		if f.usable and E.UsableOnly then tList[#tList + 1] = E.UsableOnly end
+		if f.upgrades and E.UpgradesOnly then tList[#tList + 1] = E.UpgradesOnly end
+		if f.uncollected and E.UncollectedOnly then tList[#tList + 1] = E.UncollectedOnly end
+		if f.currentExp and E.CurrentExpansionOnly then tList[#tList + 1] = E.CurrentExpansionOnly end
+		if f.exact and aIsName and E.ExactMatch then tList[#tList + 1] = E.ExactMatch end
+		if (f.minQuality or 1) > 1 then
+			for i = f.minQuality, #AHF_QUALITY_FILTERS do
+				local tV = E[AHF_QUALITY_FILTERS[i]]
+				if tV then tList[#tList + 1] = tV end
+			end
+		end
+	end
+	if aIsName or #tList > 0 then aQuery.filters = tList end
+	if f.minLevel then aQuery.minLevel = f.minLevel end
+	if f.maxLevel then aQuery.maxLevel = f.maxLevel end
+end
+
+local function tQualityName(aIndex)
+	return _G["ITEM_QUALITY"..((aIndex or 1) - 1).."_DESC"] or tostring(aIndex)
+end
+
+-- Kurztext der aktiven Filter (nil, wenn keiner aktiv ist)
+function AHF:FilterSummary()
+	local f = AHF:GetFilter()
+	local tP = {}
+	if f.usable then tP[#tP + 1] = Sku.deEn("nur benutzbar", "usable only", "utilisable seulement") end
+	if f.upgrades then tP[#tP + 1] = Sku.deEn("nur Verbesserungen", "upgrades only", "améliorations seulement") end
+	if f.uncollected then tP[#tP + 1] = Sku.deEn("nur Ungesammeltes", "uncollected only", "non collecté seulement") end
+	if f.currentExp then tP[#tP + 1] = Sku.deEn("nur aktuelle Erweiterung", "current expansion only", "extension actuelle seulement") end
+	if f.exact then tP[#tP + 1] = Sku.deEn("genauer Name", "exact name", "nom exact") end
+	if (f.minQuality or 1) > 1 then tP[#tP + 1] = Sku.deEn("ab Qualität ", "quality from ", "qualité à partir de ")..tQualityName(f.minQuality) end
+	if f.minLevel then tP[#tP + 1] = Sku.deEn("ab Stufe ", "from level ", "à partir du niveau ")..f.minLevel end
+	if f.maxLevel then tP[#tP + 1] = Sku.deEn("bis Stufe ", "up to level ", "jusqu'au niveau ")..f.maxLevel end
+	if #tP == 0 then return nil end
+	return table.concat(tP, ", ")
+end
+
 function AHF:StartBrowse(aSearchText, aEntry)
-	AHF:StartBrowseQuery({ searchString = aSearchText, sorts = {} }, aEntry)
+	-- itemClassFilters/filters ausdruecklich leer: die Suche ohne diese Felder lieferte auf Forever immer 0 Treffer (Kategorie-Suchen, die sie setzen, gingen).
+	local tQuery = { searchString = aSearchText, sorts = {}, itemClassFilters = {}, filters = {} }
+	AHF:ApplyFilterToQuery(tQuery, true)
+	local tSummary = AHF:FilterSummary()
+	if tSummary then tSay(Sku.deEn("Filter aktiv: ", "Filters active: ", "Filtres actifs : ")..tSummary) end
+	AHF:StartBrowseQuery(tQuery, aEntry)
 end
 
 -- The player's favourite items (Blizzard: the star in the search bar). Same result shape as a
@@ -261,7 +346,11 @@ end
 -- list (see AuctionCategories in the menu section below) - every level of
 -- the category tree carries its own, from the leaf up to the top category.
 function AHF:StartCategoryBrowse(aFilters, aEntry)
-	AHF:StartBrowseQuery({ searchString = "", itemClassFilters = aFilters, sorts = {} }, aEntry)
+	local tQuery = { searchString = "", itemClassFilters = aFilters, sorts = {} }
+	AHF:ApplyFilterToQuery(tQuery, false)
+	local tSummary = AHF:FilterSummary()
+	if tSummary then tSay(Sku.deEn("Filter aktiv: ", "Filters active: ", "Filtres actifs : ")..tSummary) end
+	AHF:StartBrowseQuery(tQuery, aEntry)
 end
 
 -- Re-reads the full current browse result set. The new API always hands
@@ -276,6 +365,18 @@ function AHF:RefreshBrowseResults()
 		return
 	end
 	dprint("ahfDiag browse raw results", #tRaw)
+	-- Ein leeres UPDATED kurz nach dem Absenden ist nur das Zuruecksetzen der alten Liste, noch keine Antwort: weiter warten, bis Treffer
+	-- (ADDED), BROWSE_FAILURE oder die Zeitsperre kommen. Vorher stand die Liste sofort auf "leer", obwohl der Gegenstand im Haus lag.
+	if #tRaw == 0 and gBrowse.state == "waiting" then return end
+	-- Ausweichsuche: die Liste kommt in Seiten; weitere anfordern, bis sie vollstaendig ist (die Zeitsperre beendet es notfalls)
+	local tNotFull = false
+	if gBrowse.localFilter and C_AuctionHouse.HasFullBrowseResults then
+		local tOkF, tFull = pcall(C_AuctionHouse.HasFullBrowseResults)
+		if tOkF and tFull == false then
+			tNotFull = true
+			pcall(C_AuctionHouse.RequestMoreBrowseResults)
+		end
+	end
 	local tRows, tStillPending = {}, false
 	for i = 1, #tRaw do
 		local tItem = tRaw[i]
@@ -295,9 +396,18 @@ function AHF:RefreshBrowseResults()
 		end
 	end
 	table.sort(tRows, function(a, b) return (a.minPrice or 0) < (b.minPrice or 0) end)
+	-- Ausweichsuche (siehe AHF:BrowseFallback): Namen selbst gegen den eingegebenen Text pruefen
+	if gBrowse.localFilter then
+		local tKept = {}
+		for _, tRow in ipairs(tRows) do
+			if type(tRow.name) == "string" and string.find(string.lower(tRow.name), gBrowse.localFilter, 1, true) then tKept[#tKept + 1] = tRow end
+		end
+		tRows = tKept
+	end
 	dprint("ahfDiag browse rows", #tRows, "pending", tostring(tStillPending))
 	gBrowse.results = tRows
-	gBrowse.state = tStillPending and "waiting" or "done"
+	gBrowse.state = (tStillPending or tNotFull) and "waiting" or "done"
+	if gBrowse.state == "done" and #tRows == 0 and AHF:BrowseFallback() then return end
 	-- Rebuilding would orphan a detail node the user is currently inside.
 	local tDepth, tPos = 0, SkuOptions and SkuOptions.currentMenuPosition
 	while tPos and tPos ~= gBrowse.entry and tDepth < 10 do
@@ -306,6 +416,21 @@ function AHF:RefreshBrowseResults()
 	end
 	if not (tPos and tPos == gBrowse.entry and tDepth >= 2) then tRebuildAndFocus(gBrowse.entry) end
 	gBrowse.focusIndex = nil
+end
+
+-- Ausweichsuche: Antwortet das Spiel auf eine Namenssuche leer, obwohl der Gegenstand im Haus liegt (Lena 11.10.2026: "seltsamer staub"
+-- blieb leer, obwohl die Kategorie Verzauberkunst ihn mit 1355 Stueck zeigte), fragt Sku die gesamte Liste ab und filtert die Namen selbst
+-- (ohne Gross-/Kleinschreibung, Teilwort). Nur einmal je Suche; true = die Ausweichsuche laeuft, der Aufrufer macht nichts weiter.
+function AHF:BrowseFallback()
+	if not gBrowse.searchText or gBrowse.localFilter then return false end
+	-- Bei aktivem Filter keine Ausweichsuche: sie liefe an den Filtern vorbei und zeigte Gegenstaende, die der Filter ausschliesst.
+	if AHF:FilterSummary() then return false end
+	local tText, tEntry = gBrowse.searchText, gBrowse.entry
+	dprint("ahfDiag fallback: whole list, filter locally", tText)
+	AHF:StartBrowseQuery({ searchString = "", sorts = {} }, tEntry)
+	gBrowse.searchText = tText
+	gBrowse.localFilter = string.lower(tText)
+	return true
 end
 
 -- ---------------------------------------------------------------------
@@ -414,21 +539,84 @@ function AHF:StartCommodityBuy(aItemID, aQuantity, aEntry, aName, aIndex)
 	gCommodityBuy.quantity = aQuantity
 	gCommodityBuy.unitPrice = nil
 	gCommodityBuy.totalPrice = nil
+	gCommodityBuy.warning = nil
 	gCommodityBuy.entry = aEntry
 	gCommodityBuy.name = aName
-	pcall(C_AuctionHouse.StartCommoditiesPurchase, aItemID, aQuantity)
+	gCommodityBuy.startedAt = GetTime()
+	local tThrottleOk, tReady = pcall(C_AuctionHouse.IsThrottledMessageSystemReady)
+	local tOk, tErr = pcall(C_AuctionHouse.StartCommoditiesPurchase, aItemID, aQuantity)
+	dprint("ahfDiag StartCommoditiesPurchase", "item", tostring(aItemID), "qty", tostring(aQuantity), "ok", tostring(tOk), "err", tostring(tErr), "throttleReady", tostring(tReady))
+	if not tOk then
+		-- Frueher stumm (pcall): jetzt melden, sonst weiss niemand, warum das Kaufen nichts tut
+		gCommodityBuy.itemID = nil
+		pcall(function()
+			SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Kauf konnte nicht gestartet werden", "Purchase could not be started", "Impossible de lancer l'achat"), false, true, 0.2)
+		end)
+		return
+	end
+	-- Antwortet das Spiel nicht mit einem Preis, nicht schweigend haengen bleiben
+	local tStartedAt = gCommodityBuy.startedAt
+	C_Timer.After(4, function()
+		if gCommodityBuy.itemID == aItemID and gCommodityBuy.startedAt == tStartedAt and not gCommodityBuy.unitPrice then
+			dprint("ahfDiag commodity price quote missing after 4s")
+			pcall(function()
+				SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Keine Preisbestätigung vom Spiel. Bitte nochmal versuchen.", "No price confirmation from the game. Please try again.", "Pas de confirmation de prix. Réessayez."), false, true, 0.2)
+			end)
+		end
+	end)
+end
+
+-- Preis-Vorschau aus den angezeigten Angeboten: das Spiel kauft immer die guenstigsten zuerst. Reicht das billigste Angebot nicht fuer die
+-- Menge, steigt der Stueckpreis mit jedem weiteren Angebot. Rueckgabe: niedrigster Stueckpreis, hoechster benutzter Stueckpreis, Stueckzahl zum
+-- niedrigsten Preis, erwartete Gesamtkosten (nil, wenn die Angebote nicht reichen oder fehlen).
+local function tCommodityPriceSpread(aQuantity)
+	local tRows = {}
+	for _, tR in ipairs(gDetail.results or {}) do
+		if tR.isCommodity and tR.unitPrice and (tR.quantity or 0) > 0 then tRows[#tRows + 1] = tR end
+	end
+	if #tRows == 0 or not aQuantity or aQuantity < 1 then return nil end
+	table.sort(tRows, function(a, b) return a.unitPrice < b.unitPrice end)
+	local tLow, tHigh, tLowQty, tCost, tLeft = tRows[1].unitPrice, tRows[1].unitPrice, 0, 0, aQuantity
+	for _, tR in ipairs(tRows) do
+		if tLeft <= 0 then break end
+		local tTake = math.min(tLeft, tR.quantity)
+		tCost = tCost + tTake * tR.unitPrice
+		tHigh = tR.unitPrice
+		if tR.unitPrice == tLow then tLowQty = tLowQty + tTake end
+		tLeft = tLeft - tTake
+	end
+	if tLeft > 0 then return tLow, tHigh, tLowQty, nil end
+	return tLow, tHigh, tLowQty, tCost
 end
 
 function AHF:OnCommodityPriceUpdated(aUnitPrice, aTotalPrice)
 	if not gCommodityBuy.itemID then return end
 	gCommodityBuy.unitPrice = aUnitPrice
 	gCommodityBuy.totalPrice = aTotalPrice
+	-- Hinweise, wenn der Preis nicht dem entspricht, was man erwartet:
+	-- 1) mehrere Preisstufen (z. B. nur 1 Stueck zu 19, das zweite kostet 21)
+	-- 2) Gesamtpreis weicht von den angezeigten Angeboten ab (jemand hat inzwischen gekauft oder eingestellt)
+	local tLow, tHigh, tLowQty, tExpected = tCommodityPriceSpread(gCommodityBuy.quantity)
+	local tWarn = ""
+	if tLow and tHigh and tHigh > tLow then
+		tWarn = Sku.deEn("Achtung: Der Stückpreis steigt von ", "Note: the unit price rises from ", "Attention : le prix unitaire passe de ")
+			..tMoneyText(tLow)..Sku.deEn(" auf ", " to ", " à ")..tMoneyText(tHigh)..Sku.deEn(", weil nur ", ", because only ", ", car seulement ")
+			..tLowQty..Sku.deEn(" Stück zum niedrigsten Preis angeboten werden. ", " pieces are offered at the lowest price. ", " pièces sont proposées au prix le plus bas. ")
+	end
+	if tExpected and aTotalPrice and aTotalPrice ~= tExpected then
+		tWarn = tWarn..Sku.deEn("Der Preis hat sich seit der Anzeige geändert: erwartet ", "The price changed since it was listed: expected ", "Le prix a changé depuis l'affichage : attendu ")
+			..tMoneyText(tExpected)..Sku.deEn(", jetzt ", ", now ", ", maintenant ")..tMoneyText(aTotalPrice)..". "
+	end
+	gCommodityBuy.warning = (tWarn ~= "") and tWarn or nil
+	dprint("ahfDiag commodity quote", "qty", tostring(gCommodityBuy.quantity), "unit", tostring(aUnitPrice), "total", tostring(aTotalPrice),
+		"low", tostring(tLow), "high", tostring(tHigh), "expected", tostring(tExpected))
 	pcall(function()
 		SkuOptions.Voice:OutputStringBTtts(
 			(gCommodityBuy.name and (gCommodityBuy.name..": ") or "")
-				..Sku.deEn("Preis bestätigt: ", "Price confirmed: ", "Prix confirmé : ")..tMoneyText(aTotalPrice)..". "
-				..Sku.deEn("Rechts zum Bestätigen.", "Press right to confirm.", "Appuyez à droite pour confirmer."),
-			false, true, 0.2)
+				..tWarn
+				..Sku.deEn("Gesamtpreis ", "Total price ", "Prix total ")..tMoneyText(aTotalPrice)..". "
+				..Sku.deEn("Bestätigen oder abbrechen?", "Confirm or cancel?", "Confirmer ou annuler ?"),
+			true, true, 0.2, nil, nil, nil, 1)
 	end)
 	tRebuildAndFocus(gCommodityBuy.entry)
 end
@@ -447,11 +635,12 @@ end
 function AHF:OnCommodityPurchaseDone(aSucceeded)
 	local tNamePrefix = gCommodityBuy.name and (gCommodityBuy.name..": ") or ""
 	gCommodityBuy.itemID = nil
+	dprint("ahfDiag commodity purchase done", tostring(aSucceeded))
 	pcall(function()
 		SkuOptions.Voice:OutputStringBTtts(
 			tNamePrefix..(aSucceeded and Sku.deEn("Kauf abgeschlossen", "Purchase complete", "Achat terminé")
 				or Sku.deEn("Kauf fehlgeschlagen", "Purchase failed", "Achat échoué")),
-			false, true, 0.2)
+			true, true, 0.2, nil, nil, nil, 1)   -- mit Abbruch der laufenden Sprache: das Ergebnis darf nicht hinter einer Chatzeile untergehen (19:58:52 ungesprochen)
 	end)
 end
 
@@ -465,6 +654,7 @@ local gEventFrame = CreateFrame("Frame")
 gEventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 gEventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
 gEventFrame:RegisterEvent("AUCTION_HOUSE_BROWSE_FAILURE")
+gEventFrame:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
 gEventFrame:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
 gEventFrame:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
 gEventFrame:RegisterEvent("ITEM_SEARCH_RESULTS_ADDED")
@@ -481,11 +671,19 @@ gEventFrame:SetScript("OnEvent", function(self, aEvent, ...)
 		dprint("ahfDiag event", aEvent, (...))
 		if aEvent == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or aEvent == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
 			AHF:RefreshBrowseResults()
+		elseif aEvent == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
+			local tPending = gBrowse.pendingSend
+			if tPending and gBrowse.state == "waiting" then
+				gBrowse.pendingSend = nil
+				dprint("ahfDiag send queued browse query")
+				pcall(tPending[2] or C_AuctionHouse.SendBrowseQuery, tPending[1])
+			end
 		elseif aEvent == "AUCTION_HOUSE_BROWSE_FAILURE" then
 			-- No positive "zero results" event exists separately from this - a
 			-- search with no matches (or a refused query) fires ONLY this, never
 			-- the …UPDATED/…ADDED pair. Without handling it, the menu was stuck
 			-- on "Warten" forever (confirmed live 27.09.2026).
+			if AHF:BrowseFallback() then return end
 			gBrowse.state = "done"
 			tRebuildAndFocus(gBrowse.entry)
 		elseif aEvent == "ITEM_KEY_ITEM_INFO_RECEIVED" then
@@ -509,7 +707,7 @@ gEventFrame:SetScript("OnEvent", function(self, aEvent, ...)
 			AHF:OnCommodityPurchaseDone(false)
 		elseif aEvent == "AUCTION_HOUSE_SHOW_ERROR" then
 			-- Never leave "Warten" stuck on a rejected browse/detail query.
-			if gBrowse.state == "waiting" then gBrowse.state = "done"; tRebuildAndFocus(gBrowse.entry) end
+			if gBrowse.state == "waiting" and not AHF:BrowseFallback() then gBrowse.state = "done"; tRebuildAndFocus(gBrowse.entry) end
 			if gDetail.state == "waiting" then gDetail.state = "done"; tRebuildAndFocus(gDetail.entry) end
 		elseif aEvent == "AUCTION_HOUSE_CLOSED" then
 			if gCommodityBuy.itemID then pcall(C_AuctionHouse.CancelCommoditiesPurchase) end
@@ -523,6 +721,60 @@ end)
 -- ---------------------------------------------------------------------
 -- Menu
 -- ---------------------------------------------------------------------
+-- Tooltip-Text eines Gegenstands im Auktionshaus (Tooltip lesen mit Umschalt+Runter usw.). Kein Tooltip-Fenster: Blizzards Tooltip-Daten
+-- (C_TooltipInfo) lesen den Gegenstand ueber Schluessel, Link oder ID; es gilt die Quelle mit den meisten Zeilen.
+local function tAhItemTooltipText(aItemKey, aLink)
+	local tInfo = _G.C_TooltipInfo
+	if not tInfo then return nil end
+	local tBest
+	local function tConsider(aOk, aData)
+		if aOk and type(aData) == "table" and type(aData.lines) == "table" then
+			if not tBest or #aData.lines > #tBest.lines then tBest = aData end
+		end
+	end
+	if aItemKey and aItemKey.itemID then
+		if tInfo.GetItemKey then tConsider(pcall(tInfo.GetItemKey, aItemKey.itemID, aItemKey.itemLevel or 0, aItemKey.itemSuffix or 0)) end
+		if tInfo.GetItemByID then tConsider(pcall(tInfo.GetItemByID, aItemKey.itemID)) end
+	end
+	if aLink and tInfo.GetHyperlink then tConsider(pcall(tInfo.GetHyperlink, aLink)) end
+	if not tBest then return nil end
+	local tOut = {}
+	for _, tLine in ipairs(tBest.lines) do
+		local tLeft, tRight = tLine.leftText, tLine.rightText
+		if type(tLeft) == "string" and not Sku.IsSecret(tLeft) and tLeft ~= "" and not string.find(tLeft, "Open Issue Report", 1, true) then
+			if type(tRight) == "string" and not Sku.IsSecret(tRight) and tRight ~= "" then tLeft = tLeft.." "..tRight end
+			tOut[#tOut + 1] = tLeft
+		end
+	end
+	-- Wie bei den anderen Tooltips in Sku: Qualitaet hinter dem Namen (nach Einstellung) und "Gegenstandsstufe" als zweite Zeile.
+	local tQualityText, tLevel
+	if aLink then
+		tQualityText = SkuUtil:ItemQualityString(aLink)
+		tLevel = SkuUtil:ItemLevel(aLink)
+	elseif aItemKey then
+		local tOkI, tKeyInfo = pcall(C_AuctionHouse.GetItemKeyInfo, aItemKey, false)
+		if tOkI and type(tKeyInfo) == "table" and tKeyInfo.quality then tQualityText = _G["ITEM_QUALITY"..tKeyInfo.quality.."_DESC"] end
+		if aItemKey.itemLevel and aItemKey.itemLevel > 1 then tLevel = aItemKey.itemLevel end
+	end
+	local tShowQuality = false
+	pcall(function() tShowQuality = SkuOptions.db.profile["SkuCore"].itemSettings.ShowItemQality == true end)
+	if tQualityText and tShowQuality and tOut[1] then tOut[1] = tOut[1].." ("..tQualityText..")" end
+	if tLevel and #tOut > 0 then table.insert(tOut, 2, L["Item Level"]..": "..tLevel) end
+	if #tOut == 0 then return nil end
+	return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
+end
+
+-- Setzt am Menue-Eintrag den Tooltip-Text (wird erst beim Lesen gebildet) und die Gegenstandsangabe fuer den Vergleich mit dem Angelegten.
+local function tSetAhTooltip(aEntry, aItemKey, aLink)
+	aEntry.itemId = aLink or (aItemKey and aItemKey.itemID)
+	aEntry.textFirstLine = aEntry.name
+	aEntry.textFull = function()
+		local tText = tAhItemTooltipText(aItemKey, aLink)
+		if tText and tText ~= "" then return { tText } end
+		return { Sku.deEn("Kein Tooltip verfügbar", "No tooltip available", "Aucune infobulle disponible") }
+	end
+end
+
 local function tBrowseRowLabel(aRow)
 	local tPriceText = tMoneyText(aRow.minPrice)
 	if aRow.totalQuantity and aRow.totalQuantity > 1 then
@@ -545,11 +797,13 @@ local function tBuildCommodityConfirmChildren(aParentEntry)
 		tW.dynamic = false
 		return
 	end
-	local tConfirm = SkuOptions:InjectMenuItems(aParentEntry, {Sku.deEn("Bestätigen: ", "Confirm: ", "Confirmer : ")..tMoneyText(gCommodityBuy.totalPrice)}, SkuGenericMenuItem)
+	local tConfirm = SkuOptions:InjectMenuItems(aParentEntry, {Sku.deEn("Bestätigen: ", "Confirm: ", "Confirmer : ")..tMoneyText(gCommodityBuy.totalPrice)..(gCommodityBuy.warning and (", "..Sku.deEn("Preis steigt", "price rises", "prix en hausse")) or "")}, SkuGenericMenuItem)
 	tConfirm.dynamic = false
+	tConfirm.actionInPlace = true   -- ENTER fuehrt die eigene Aktion aus; sonst leitet ein isSelect-Vorfahr (Suche) ENTER an die Suche um
 	tConfirm.OnAction = function() AHF:ConfirmCommodityBuy() end
 	local tCancel = SkuOptions:InjectMenuItems(aParentEntry, {Sku.deEn("Abbrechen", "Cancel", "Annuler")}, SkuGenericMenuItem)
 	tCancel.dynamic = false
+	tCancel.actionInPlace = true   -- ENTER fuehrt die eigene Aktion aus; sonst leitet ein isSelect-Vorfahr (Suche) ENTER an die Suche um
 	tCancel.OnAction = function()
 		AHF:CancelCommodityBuy()
 		tRebuildAndFocus(aParentEntry, true)
@@ -589,6 +843,7 @@ local function tAddBidLeaves(aParent, aData, aName)
 	if not (aData.minBid and aData.minBid > 0) then return false end
 	local tBidMin = SkuOptions:InjectMenuItems(aParent, {Sku.deEn("Mindestgebot bieten: ", "Bid the minimum: ", "Enchérir le minimum : ")..tMoneyText(aData.minBid)}, SkuGenericMenuItem)
 	tBidMin.dynamic = false
+	tBidMin.actionInPlace = true   -- ENTER fuehrt die eigene Aktion aus; sonst leitet ein isSelect-Vorfahr (Suche) ENTER an die Suche um
 	tBidMin.OnAction = function()
 		AHF:PlaceItemBid(aData, aData.minBid, aName)
 	end
@@ -701,6 +956,7 @@ local function tBuildDetailChildren(aParentEntry)
 		local tRowEntry = SkuOptions:InjectMenuItems(aParentEntry, {tLabel}, SkuGenericMenuItem)
 		tRowEntry.dynamic = true
 		tRowEntry.data = tRow
+		tSetAhTooltip(tRowEntry, gDetail.itemKey, tRow.itemLink)
 		if i == tPrimaryIndex then tRowEntry.ahfPrimary = true end
 		tRowEntry.BuildChildren = function(self)
 			self.children = {}
@@ -712,10 +968,39 @@ local function tBuildDetailChildren(aParentEntry)
 				return
 			end
 			if self.data.isCommodity then
-				local tBuyEntry = SkuOptions:InjectMenuItems(self, {L["Kaufen"]}, SkuGenericMenuItem)
+				-- Menge waehlen, bevor gekauft wird. Das Spiel kauft immer die guenstigsten Angebote zuerst, egal in welcher Zeile man steht;
+				-- hoechstens so viel, wie insgesamt angeboten wird. Voreinstellung: die Menge dieses Angebots.
+				local tTotalAvail = 0
+				for _, tR in ipairs(gDetail.results) do tTotalAvail = tTotalAvail + (tR.quantity or 0) end
+				local tMaxQty = math.max(1, tTotalAvail)
+				local tData = self.data
+				tData.buyQty = math.max(1, math.min(tData.buyQty or tData.quantity or 1, tMaxQty))
+				local function tQtyName() return Sku.deEn("Menge: ", "Quantity: ", "Quantité : ")..tData.buyQty..Sku.deEn(" von höchstens ", " of at most ", " sur au plus ")..tMaxQty end
+				local function tBuyName() return L["Kaufen"]..": "..tData.buyQty..Sku.deEn(" Stück", " pieces", " pièces") end
+				local tBuyEntry
+				local tQtyLeaf = tSettingLeaf(self, tQtyName(), function(aLeaf)
+					dprint("ahfDiag quantity prompt", "max", tMaxQty, "current", tData.buyQty)
+					local tShowOk, tShowErr = pcall(SkuOptions.EditBoxShow, SkuOptions, "", function()
+						local tN = tonumber((SkuOptionsEditBoxEditBox:GetText() or ""):match("%d+"))
+						if tN and tN >= 1 then
+							tData.buyQty = math.min(math.floor(tN), tMaxQty)
+							aLeaf.name = tQtyName()
+							if tBuyEntry then tBuyEntry.name = tBuyName() end
+						else
+							tSay(Sku.deEn("Menge nicht verstanden", "Quantity not understood", "Quantité non comprise"))
+						end
+						tVocalize()
+					end, nil)
+					dprint("ahfDiag quantity prompt shown", tostring(tShowOk), tostring(tShowErr))
+					C_Timer.After(0.1, function()
+						SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Menge eingeben, höchstens ", "Enter quantity, at most ", "Saisir la quantité, au plus ")..tMaxQty, true, true, 0.1, nil, nil, nil, 1)
+					end)
+				end)
+				tBuyEntry = SkuOptions:InjectMenuItems(self, {tBuyName()}, SkuGenericMenuItem)
 				tBuyEntry.dynamic = false
+				tBuyEntry.actionInPlace = true   -- ENTER fuehrt die eigene Aktion aus; sonst leitet ein isSelect-Vorfahr (Suche) ENTER an die Suche um
 				tBuyEntry.OnAction = function()
-					AHF:StartCommodityBuy(self.data.itemID, self.data.quantity, self, gDetail.name, self.data.index)
+					AHF:StartCommodityBuy(tData.itemID, tData.buyQty, self, gDetail.name, tData.index)
 					tRebuildAndFocus(self, true)
 				end
 			elseif self.data.isOwn then
@@ -726,6 +1011,7 @@ local function tBuildDetailChildren(aParentEntry)
 				if tData.buyoutAmount then
 					local tBuyEntry = SkuOptions:InjectMenuItems(self, {L["Kaufen"]..": "..tMoneyText(tData.buyoutAmount)}, SkuGenericMenuItem)
 					tBuyEntry.dynamic = false
+					tBuyEntry.actionInPlace = true   -- ENTER fuehrt die eigene Aktion aus; sonst leitet ein isSelect-Vorfahr (Suche) ENTER an die Suche um
 					tBuyEntry.OnAction = function()
 						AHF:BuyItemAuction(tData.auctionID, tData.buyoutAmount, gDetail.name)
 					end
@@ -758,6 +1044,7 @@ local function tInjectItemRow(aParentEntry, aRow)
 	local tRowEntry = SkuOptions:InjectMenuItems(aParentEntry, {tBrowseRowLabel(aRow)}, SkuGenericMenuItem)
 	tRowEntry.dynamic = true
 	tRowEntry.data = aRow
+	tSetAhTooltip(tRowEntry, aRow.itemKey, nil)
 	tMarkEntering(tRowEntry)
 	tRowEntry.BuildChildren = function(selfRow)
 		if gDetail.entry ~= selfRow or gDetail.state == "idle" then
@@ -1427,6 +1714,7 @@ local function tAppendBidsChildren(aParent)
 			if tData.buyoutAmount and tData.buyoutAmount > 0 then
 				local tBuy = SkuOptions:InjectMenuItems(self, {L["Kaufen"]..": "..tMoneyText(tData.buyoutAmount)}, SkuGenericMenuItem)
 				tBuy.dynamic = false
+				tBuy.actionInPlace = true   -- ENTER fuehrt die eigene Aktion aus; sonst leitet ein isSelect-Vorfahr (Suche) ENTER an die Suche um
 				tBuy.OnAction = function() AHF:BuyItemAuction(tData.auctionID, tData.buyoutAmount, tData.name) end
 			end
 			-- Raising a bid you already lead is pointless; offer it only after being outbid.
@@ -1598,6 +1886,66 @@ function AHF:BuildSearchEntries(aSelf)
 			local tNone = SkuOptions:InjectMenuItems(self, {L["AH_CategoriesLoading"]}, SkuGenericMenuItem)
 			tNone.dynamic = false
 		end
+	end
+
+	-- Filter (Blizzard: Filter-Menue neben der Suchleiste): gelten fuer Namenssuche und Kategorien. Einstellungen bleiben gespeichert.
+	local tFilterEntry = SkuOptions:InjectMenuItems(aSelf, {Sku.deEn("Filter", "Filters", "Filtres")}, SkuGenericMenuItem)
+	tFilterEntry.dynamic = true
+	tFilterEntry.BuildChildren = function(self)
+		self.children = {}
+		local tF = AHF:GetFilter()
+		local tYes, tNo = Sku.deEn("ja", "yes", "oui"), Sku.deEn("nein", "no", "non")
+		local function tToggle(aLabel, aKey)
+			local function tName() return aLabel..": "..(tF[aKey] and tYes or tNo) end
+			tSettingLeaf(self, tName(), function(aLeaf)
+				tF[aKey] = (not tF[aKey]) or nil
+				aLeaf.name = tName()
+			end)
+		end
+		tToggle(Sku.deEn("Nur benutzbare", "Usable only", "Utilisable seulement"), "usable")
+		tToggle(Sku.deEn("Nur Verbesserungen für dich", "Upgrades only", "Améliorations seulement"), "upgrades")
+		tToggle(Sku.deEn("Nur Ungesammeltes", "Uncollected only", "Non collecté seulement"), "uncollected")
+		tToggle(Sku.deEn("Nur aktuelle Erweiterung", "Current expansion only", "Extension actuelle seulement"), "currentExp")
+		tToggle(Sku.deEn("Genauer Name bei der Namenssuche", "Exact name for name searches", "Nom exact pour la recherche par nom"), "exact")
+		local function tQualName()
+			return Sku.deEn("Mindestqualität: ", "Minimum quality: ", "Qualité minimale : ")
+				..(((tF.minQuality or 1) > 1) and tQualityName(tF.minQuality) or Sku.deEn("beliebig", "any", "toutes"))
+		end
+		tSettingLeaf(self, tQualName(), function(aLeaf)
+			local tQ = (tF.minQuality or 1) + 1
+			if tQ > 7 then tQ = 1 end
+			tF.minQuality = (tQ > 1) and tQ or nil
+			aLeaf.name = tQualName()
+		end)
+		local function tLevelLeaf(aLabel, aKey)
+			local function tName() return aLabel..": "..(tF[aKey] or Sku.deEn("beliebig", "any", "toutes")) end
+			tSettingLeaf(self, tName(), function(aLeaf)
+				SkuOptions:EditBoxShow("", function()
+					local tText = SkuOptionsEditBoxEditBox:GetText() or ""
+					local tN = tonumber(tText:match("%d+"))
+					if tN and tN >= 1 then
+						tF[aKey] = math.floor(tN)
+					elseif tText == "" or tN == 0 then
+						tF[aKey] = nil
+					else
+						tSay(Sku.deEn("Zahl nicht verstanden", "Number not understood", "Nombre non compris"))
+					end
+					aLeaf.name = tName()
+					tVocalize()
+				end, nil)
+				C_Timer.After(0.1, function()
+					SkuOptions.Voice:OutputStringBTtts(Sku.deEn("Stufe eingeben, leer oder 0 für beliebig", "Enter level, empty or 0 for any", "Saisir le niveau, vide ou 0 pour tous"), true, true, 0.1, nil, nil, nil, 1)
+				end)
+			end)
+		end
+		tLevelLeaf(Sku.deEn("Stufe von", "Level from", "Niveau de"), "minLevel")
+		tLevelLeaf(Sku.deEn("Stufe bis", "Level up to", "Niveau jusqu'à"), "maxLevel")
+		tSettingLeaf(self, Sku.deEn("Alle Filter zurücksetzen", "Reset all filters", "Réinitialiser tous les filtres"), function()
+			local tS = SkuSettings:Sub("SkuCore", nil, "char")
+			tS.ahfFilter = {}
+			tSay(Sku.deEn("Filter zurückgesetzt", "Filters reset", "Filtres réinitialisés"))
+			tRebuildAndFocus(self, true)
+		end)
 	end
 
 	-- Favourite items (Blizzard: the star in the search bar); only where the server supports them.

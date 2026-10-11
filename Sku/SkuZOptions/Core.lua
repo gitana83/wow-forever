@@ -2757,6 +2757,20 @@ function SkuOptions:CreateMainFrame()
 					CloseMail();
 				end
 
+				-- Forever: Das Auktionshaus ist Blizzards neues Fenster (AuctionHouseFrame) und steht nicht in der Liste der Interaktionsfenster;
+				-- ohne das blieb es nach dem Schliessen des Menues offen, das Menue ging sofort wieder auf und man musste ein zweites Mal Escape druecken.
+				if _G.AuctionHouseFrame and _G.AuctionHouseFrame:IsShown() then
+					dprint("menuClose close", "AuctionHouseFrame")
+					local tAhBtn = _G.AuctionHouseFrame.CloseButton or _G["AuctionHouseFrameCloseButton"]
+					if tAhBtn and tAhBtn.Click then
+						tAhBtn:Click()
+					elseif _G.HideUIPanel then
+						pcall(_G.HideUIPanel, _G.AuctionHouseFrame)
+					else
+						_G.AuctionHouseFrame:Hide()
+					end
+				end
+
 				if AuctionFrame then
 					if (AuctionFrame:IsShown() ) then
 						_G["AuctionFrameCloseButton"]:Click()

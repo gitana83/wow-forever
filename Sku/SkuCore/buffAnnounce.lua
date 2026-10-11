@@ -28,6 +28,24 @@ function BuffAnnounce:OnDisable()
    BuffAnnounce:UnregisterAllEvents()
 end
 
+-- Buffs, die ein Schamanen-Totem verleiht, werden nicht angesagt: sie kommen und gehen mit jedem gesetzten Totem und jedem Schritt in oder aus
+-- der Reichweite und waren zu viel. Erkannt wird ueber den Namen: alles mit "Totem" im Namen (z. B. "Totem der Flammenzunge") plus die
+-- uebrigen Totem-Auren (die Aura heisst oft nur wie der Effekt). Weitere Namen einfach in die Liste eintragen.
+local TOTEM_AURA_NAMES = {
+   -- deutsch
+   ["Stärke der Erde"] = true, ["Steinhaut"] = true, ["Manaquell"] = true, ["Heilquelle"] = true, ["Anmut der Luft"] = true,
+   ["Windzorn"] = true, ["Zorn der Lüfte"] = true, ["Feuerwiderstand"] = true, ["Frostwiderstand"] = true, ["Naturwiderstand"] = true,
+   ["Beruhigende Luft"] = true,
+   -- englisch
+   ["Strength of Earth"] = true, ["Stoneskin"] = true, ["Mana Spring"] = true, ["Healing Stream"] = true, ["Grace of Air"] = true,
+   ["Windfury"] = true, ["Wrath of Air"] = true, ["Fire Resistance"] = true, ["Frost Resistance"] = true, ["Nature Resistance"] = true,
+   ["Tranquil Air"] = true,
+}
+local function tIsTotemAura(aName)
+   if string.find(aName, "Totem", 1, true) then return true end
+   return TOTEM_AURA_NAMES[aName] == true
+end
+
 local function tDurationText(aDuration)
    if type(aDuration) ~= "number" or aDuration <= 0 then return "" end
    if aDuration >= 3600 then
@@ -56,6 +74,7 @@ function BuffAnnounce:UNIT_AURA(aEvent, aUnit, aInfo)
          if tAura.isHelpful ~= true and tAura.spellId ~= 1229451 then return end
          local tName = tAura.name
          if type(tName) ~= "string" or tName == "" then return end
+         if tIsTotemAura(tName) then return end
          local tKey = tAura.spellId or tName
          if gLastSpoken[tKey] and (tNow - gLastSpoken[tKey]) < MIN_REPEAT_SECONDS then return end
          gLastSpoken[tKey] = tNow
