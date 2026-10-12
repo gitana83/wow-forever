@@ -587,7 +587,7 @@ local function getEquippedItemTooltipText(invSlot)
 			end
 			if #tOut > 0 then
 				-- Das angelegte Stueck bekam im Vergleich bisher weder Gegenstandsstufe noch Qualitaet, nur das Taschenstueck
-				-- (Lena, 10.10.2026): beides wie beim Taschen-Tooltip aus dem Link des angelegten Gegenstands ergaenzen.
+				-- (Tester, 10.10.2026): beides wie beim Taschen-Tooltip aus dem Link des angelegten Gegenstands ergaenzen.
 				local tLink = _G.GetInventoryItemLink and _G.GetInventoryItemLink("player", invSlot)
 				if type(tLink) == "string" and tLink ~= "" then
 					local tQuality = SkuUtil:ItemQualityString(tLink)
@@ -1790,7 +1790,7 @@ function SkuCore:Build_BagsFrame(aParentChilds)
 	-- Blizzards eigener Vorlage BankPanelPurchaseButtonScriptTemplate, dessen Bankart per Attribut
 	-- "overrideBankType" fest eingestellt ist - unabhaengig davon, welche Bank-Registerkarte gerade aktiv ist.
 	-- Der Knopf zeigt Blizzards Bestaetigungs-Popup (CONFIRM_BUY_BANK_TAB, mit Preis). Gekauft wird erst,
-	-- wenn Lena dort "Ja" waehlt (Popup-Menue) - nie automatisch.
+	-- wenn der Spieler dort "Ja" waehlt (Popup-Menue) - nie automatisch.
 	if Sku.isForever and SkuCore:BankIsOpen() == true and _G.C_Bank and _G.Enum and _G.Enum.BankType then
 		local tBankTypes = {
 			{ bankType = Enum.BankType.Character, name = Sku.deEn("Charakter-Bank", "Character bank", "Banque du personnage") },
@@ -4331,7 +4331,7 @@ local function tTrainerSelectedIndex()
 	return tFrame.displayIndexToSkillIndex[tFrame.selectedService]
 end
 
--- Wenn Lena in Blizzards Fenster eine andere Fertigkeit waehlt (Enter auf den Eintrag, Taste liegt direkt an der Zeile),
+-- Wenn der Spieler in Blizzards Fenster eine andere Fertigkeit waehlt (Enter auf den Eintrag, Taste liegt direkt an der Zeile),
 -- laeuft Sku nicht mit: ein Post-Hook auf ClassTrainer_SetSelection sagt die Auswahl an und baut das Menue neu.
 local tTrainerLastBuiltSelection
 local tTrainerSelectionHooked

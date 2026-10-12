@@ -564,7 +564,7 @@ function SkuMob:MuteTargetHealthAtTarget(aUnitId)
 	end
 	-- Das eigene Tier: die Ziel-Gesundheit ist die einzige Moeglichkeit, seine Gesundheit zu hoeren (die Zahl selbst ist fuer AddOns
 	-- gesperrt). Die Stummschaltung bis zum ersten Schaden wuerde die Ansage beim Anvisieren des unverletzten Tiers verschlucken
-	-- (Lena, 10.10.2026: "kommt nur der Petname, nicht die HP"). Beim Tier deshalb nicht stummschalten.
+	-- (Tester, 10.10.2026: "kommt nur der Petname, nicht die HP"). Beim Tier deshalb nicht stummschalten.
 	if UnitIsUnit("target", "pet") then
 		if tTargetHealthMuted then tRestoreTargetHealth() end
 		return
@@ -890,7 +890,7 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 				tRaidTargetString = SkuCore.RaidTargetValues[SkuCore.aqCombat:aqCombatGetSkuRaidTarget(tUnitGUID)].color..";"
 			else
 				if UnitCanAttack("player", aUnitId) and tIsPlayerControled == false and status then
-					-- Einmalig einschalten (11.10.2026, auf Lenas Wunsch): Skus eigene Gegnerfarben (Rot, Blau, ...) fuer Gegner im Kampf.
+					-- Einmalig einschalten (11.10.2026, auf Wunsch eines Testers): Skus eigene Gegnerfarben (Rot, Blau, ...) fuer Gegner im Kampf.
 					-- Danach bleibt die Wahl im Menue.
 					if SkuSettings:Sub("SkuMob").autoRaidTargetsAutoOnDone ~= true then
 						SkuSettings:Sub("SkuMob").autoRaidTargetsAutoOnDone = true

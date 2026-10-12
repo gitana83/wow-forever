@@ -54,7 +54,7 @@ end
 -- ---------------------------------------------------------------------
 -- Vorhandene Zutaten. Blizzard rechnet Zutaten aus Bank/Reagenzienbank/Kriegsmeute-Bank nur dann mit, wenn das
 -- Spiel es gerade erlaubt (ReagentsFromBankAllowed, d.h. bei geoeffneter Bank; siehe ItemUtil.GetCraftingReagentCount).
--- Die Standard-Anzahl GetCraftableCount zaehlte laut Lenas Beobachtung beim Lederer auch Leder mit, das nur auf der
+-- Die Standard-Anzahl GetCraftableCount zaehlte laut Beobachtung eines Testers beim Lederer auch Leder mit, das nur auf der
 -- Bank lag. Sku zaehlt deshalb selbst: normalerweise nur, was der Charakter bei sich traegt; mit geoeffneter Bank
 -- (wenn Blizzard es erlaubt) auch die Bank.
 -- ---------------------------------------------------------------------

@@ -1228,7 +1228,7 @@ function SkuOptions:UpdateOverviewText(aPageId)
 
 
 	-- [Forever] Manche positiven Effekte stuft das Spiel selbst als schaedlich ein (Verbesserter Ruhebonus 1229451:
-	-- isHarmful=true). Sie gehoeren fuer Lena zu den Buffs: hier anhaengen, in der Debuff-Liste unten auslassen.
+	-- isHarmful=true). Sie gehoeren fuer den Spieler zu den Buffs: hier anhaengen, in der Debuff-Liste unten auslassen.
 	for x = 1, 40 do
 		local tOkB, name, _, _, _, _, expirationTime, _, _, _, spellId = pcall(UnitDebuff, "player", x)
 		if tOkB and name and spellId and tBuffLikeDebuffs[spellId] then

@@ -28,7 +28,7 @@
 -- NOT built: selling, bidding below buyout, owned-auctions list. A full-
 -- market scan was tried and removed again (27.09.2026) - Blizzard's OWN new
 -- AH never calls ReplicateItems either, so Sku shouldn't pretend to have a
--- scan the real game doesn't. Flagged to Lena as follow-ups, not gaps
+-- scan the real game doesn't. Flagged to the tester as follow-ups, not gaps
 -- discovered later.
 -- =====================================================================
 
@@ -56,7 +56,7 @@ local gCommodityBuy = { itemID = nil, quantity = nil, unitPrice = nil, totalPric
 -- Mainline/Classic, checked in ki bereich/wissen/wow-forever-api) never calls
 -- ReplicateItems/GetReplicateItemInfo anywhere. The new AH itself has no full-
 -- market-scan feature any more, only name search and category browse - so
--- Sku shouldn't pretend to have one either. Confirmed with Lena.
+-- Sku shouldn't pretend to have one either. Confirmed with the tester.
 
 local function tMoneyText(aCopper)
 	local tOk, tText = pcall(GetCoinText, aCopper, " ")
@@ -228,7 +228,7 @@ function AHF:StartBrowseQuery(aQuery, aEntry, aSend)
 	gBrowse.generation = (gBrowse.generation or 0) + 1
 	local tGen = gBrowse.generation
 	-- Das Spiel drosselt Abfragen an das Auktionshaus: wird eine Abfrage gesendet, waehrend das System nicht bereit ist, verschwindet sie
-	-- ohne jede Rueckmeldung (Lena 11.10.2026: Suche nach "Seltsamer Staub" blieb leer, im Log kein Ereignis zur zweiten Abfrage).
+	-- ohne jede Rueckmeldung (Tester 11.10.2026: Suche nach "Seltsamer Staub" blieb leer, im Log kein Ereignis zur zweiten Abfrage).
 	-- Dann merken wir sie und senden sie bei AUCTION_HOUSE_THROTTLED_SYSTEM_READY.
 	local tThrottleOk, tReady = pcall(C_AuctionHouse.IsThrottledMessageSystemReady)
 	dprint("ahfDiag throttle ready", tostring(tThrottleOk), tostring(tReady))
@@ -246,7 +246,7 @@ function AHF:StartBrowseQuery(aQuery, aEntry, aSend)
 	-- refused for some other server-side reason) is not always guaranteed to
 	-- fire, and there is no positive "zero results" signal distinct from
 	-- "no signal at all yet". Without this, a failed/empty query left the
-	-- menu stuck on "Warten" forever (confirmed live 27.09.2026 - Lena typed
+	-- menu stuck on "Warten" forever (confirmed live 27.09.2026 - the tester typed
 	-- a search and it never resolved). aGeneration guards against a LATE
 	-- timeout firing after a newer search already replaced this one.
 	-- Diagnose: was das Spiel nach der Abfrage wirklich im Speicher hat (Treffer kommen manchmal ohne Ereignis)
@@ -418,7 +418,7 @@ function AHF:RefreshBrowseResults()
 	gBrowse.focusIndex = nil
 end
 
--- Ausweichsuche: Antwortet das Spiel auf eine Namenssuche leer, obwohl der Gegenstand im Haus liegt (Lena 11.10.2026: "seltsamer staub"
+-- Ausweichsuche: Antwortet das Spiel auf eine Namenssuche leer, obwohl der Gegenstand im Haus liegt (Tester 11.10.2026: "seltsamer staub"
 -- blieb leer, obwohl die Kategorie Verzauberkunst ihn mit 1355 Stueck zeigte), fragt Sku die gesamte Liste ab und filtert die Namen selbst
 -- (ohne Gross-/Kleinschreibung, Teilwort). Nur einmal je Suche; true = die Ausweichsuche laeuft, der Aufrufer macht nichts weiter.
 function AHF:BrowseFallback()
@@ -953,7 +953,7 @@ local function tBuildDetailChildren(aParentEntry)
 	-- Every row repeats the item name (gDetail.name) - without it, a line like
 	-- "2x zu je 24 Kupfer" is meaningless out of context, e.g. after navigating
 	-- away and back, or the first time you land here at all. Confirmed live
-	-- 27.09.2026: Lena heard exactly that and couldn't tell what it referred to.
+	-- 27.09.2026: the tester heard exactly that and couldn't tell what it referred to.
 	local tNamePrefix = (gDetail.name or "?")..": "
 	local tPrimaryIndex = gDetail.focusIndex or 1
 	for i, tRow in ipairs(gDetail.results) do

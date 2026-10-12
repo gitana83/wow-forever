@@ -2,7 +2,7 @@
 -- =====================================================================
 -- Sku Aktionsleisten-Seitenwechsel im Kampf (WoW Forever/Camelot)
 --
--- Problem (Lena, 10.10.2026): Umschalt+1 / Umschalt+2 (ACTIONPAGE1/2) wechseln die Leistenseite im Kampf nicht.
+-- Problem (Tester, 10.10.2026): Umschalt+1 / Umschalt+2 (ACTIONPAGE1/2) wechseln die Leistenseite im Kampf nicht.
 -- Blizzards Tastenbelegung ruft dafuer C_ActionBar.SetActionBarPage aus normalem Lua; Blizzards Leistencode laeuft
 -- bei ihr schon "von Sku verunreinigt" (ADDON_ACTION_BLOCKED MainActionBar:SetPointBase u.a.), im Kampf bleibt der Wechsel stehen.
 --

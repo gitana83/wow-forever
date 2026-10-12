@@ -658,7 +658,7 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 	local tRewardLines = {}
 	local tOkMoney, tMoney = pcall(GetQuestLogRewardMoney, questID)
 	-- Blizzards Questfenster (QuestInfo_ShowRewards) fragt das Gold des gewaehlten Log-Eintrags OHNE questID ab. Mit der ID kam bei Quests
-	-- mit Gegenstandsbelohnung 0 zurueck, die Goldbelohnung fehlte (Lena, 10.10.2026). Dann die Quest waehlen und ohne ID fragen.
+	-- mit Gegenstandsbelohnung 0 zurueck, die Goldbelohnung fehlte (Tester, 10.10.2026). Dann die Quest waehlen und ohne ID fragen.
 	if not (tOkMoney and type(tMoney) == "number" and tMoney > 0) then
 		if C_QuestLog.SetSelectedQuest then pcall(C_QuestLog.SetSelectedQuest, questID) end
 		local tOkMoney2, tMoney2 = pcall(GetQuestLogRewardMoney)
