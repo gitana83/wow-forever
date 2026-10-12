@@ -2747,7 +2747,8 @@ function SkuChat:OnInitialize()
 		local full
 		if logIdx and SkuQuest and SkuQuest.GetTTSText then
 			local ok, txt = pcall(function()
-				return SkuQuest:GetTTSText(logIdx)
+				-- GetTTSText erwartet seit dem Forever-Umbau die questID, nicht den Index im Questlog (logIdx dient nur noch als "im Log"-Pruefung)
+				return SkuQuest:GetTTSText(questID)
 			end)
 			if ok and txt and txt ~= "" then
 				full = txt

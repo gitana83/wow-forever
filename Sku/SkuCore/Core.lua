@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-doc-name
+﻿---@diagnostic disable: undefined-doc-name
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 --/script skudebuglevel = 0
@@ -4424,21 +4424,39 @@ end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuCore:MERCHANT_SHOW(...)
-	dprint("MERCHANT_SHOW")
+	--dprint("MERCHANT_SHOW")
 	SkuCore:CheckFrames()
 	SkuOptions:StopSounds(5)
-	-- [Forever] Beim zweiten Haendler kurz nach dem ersten oeffneten sich die Taschen nicht mit (Blizzards MerchantFrame_OnShow ruft
-	-- OpenAllBags, das aber nichts tat), im Menue stand dann nur "Haendler" und man kam nicht zu den Taschen. Fehlen die Taschen
-	-- nach dem Oeffnen, werden sie hier selbst geoeffnet (ausser im Kampf, dort ist das Oeffnen gesperrt).
-	C_Timer.After(0.3, function()
-		if InCombatLockdown and InCombatLockdown() then return end
-		if not (_G.MerchantFrame and _G.MerchantFrame:IsVisible()) then return end
-		local tBags = _G["ContainerFrame1"]
-		if tBags and tBags:IsVisible() then return end
-		dprint("MERCHANT_SHOW: Taschen nicht offen, oeffne selbst")
-		if _G.OpenAllBags then pcall(_G.OpenAllBags) end
-		if not (tBags and tBags:IsVisible()) and _G.OpenBackpack then pcall(_G.OpenBackpack) end
-		SkuCore:CheckFrames()
+end
+
+-- [Forever] Manchmal oeffnen sich beim Haendler die Taschen nicht mit (Blizzards MerchantFrame_OnShow ruft OpenAllBags, das dann nichts
+-- tut; zuletzt nach dem Spielstart beim ersten Haendler): im Menue steht dann nur "Haendler", man kommt nicht zu den Taschen.
+-- SkuCore:MERCHANT_SHOW oben ist NICHT als Ereignis angemeldet (Absicht: das Menue wird ueber ShowUIPanel aufgebaut), deshalb hier ein
+-- eigener kleiner Rahmen. Fehlen die Taschen kurz nach dem Oeffnen, werden sie selbst geoeffnet (nicht im Kampf, dort gesperrt).
+if Sku and Sku.isForever then
+	local tMerchantBagsFrame = CreateFrame("Frame")
+	tMerchantBagsFrame:RegisterEvent("MERCHANT_SHOW")
+	tMerchantBagsFrame:SetScript("OnEvent", function()
+		C_Timer.After(0.4, function()
+			pcall(function()
+				if InCombatLockdown and InCombatLockdown() then return end
+				if not (_G.MerchantFrame and _G.MerchantFrame:IsVisible()) then return end
+				local tBags = _G["ContainerFrame1"]
+				if tBags and tBags:IsVisible() then return end
+				dprint("MERCHANT_SHOW: Taschen nicht offen, oeffne selbst")
+				-- erst Blizzards Weg, dann Bag fuer Bag (wie OpenAllBagsHelper in LocalMenu.lua)
+				if _G.OpenAllBags then pcall(_G.OpenAllBags) end
+				if not (tBags and tBags:IsVisible()) and _G.OpenBag and _G.C_Container then
+					for tBag = 0, (_G.NUM_BAG_SLOTS or 4) do
+						local tOkN, tNum = pcall(C_Container.GetContainerNumSlots, tBag)
+						if tOkN and (tonumber(tNum) or 0) > 0 then pcall(_G.OpenBag, tBag) end
+					end
+				end
+				if not (tBags and tBags:IsVisible()) and _G.OpenBackpack then pcall(_G.OpenBackpack) end
+				dprint("MERCHANT_SHOW: Taschen jetzt sichtbar", tostring(tBags and tBags:IsVisible()))
+				SkuCore:CheckFrames()
+			end)
+		end)
 	end)
 end
 

@@ -770,18 +770,23 @@ function SkuQuest:GetTTSText(aQuestID, aIsRetry)
 	-- everything and patches both the stored menu text and a still-open live
 	-- reading session -- otherwise a late-arriving answer is computed but
 	-- never actually reaches the player's ears.
-	if not aIsRetry and (tObjCount == 0 or #tRewardLines == 0) then
+	-- Jede gelesene Quest merkt sich ihre ID und ihren Menueknoten (auch ohne Retry): sonst bliebe nach dem Wechsel auf eine andere,
+	-- vollstaendige Quest die ID der alten stehen und der verspaetete Retry schriebe deren Text in den neuen Knoten.
+	if not aIsRetry then
 		SkuQuest.LastReadQuestID = aQuestID
+	end
+	local tReadNode = SkuOptions.currentMenuPosition
+	if not aIsRetry and (tObjCount == 0 or #tRewardLines == 0) then
 		if C_Timer and C_Timer.After then
 			C_Timer.After(0.6, function()
 				if SkuQuest.LastReadQuestID ~= aQuestID then return end
 				local tLateSections = SkuQuest:GetTTSText(aQuestID, true)
 				dprint("SkuQuest GetTTSText diag retry total sections", questID, #tLateSections)
 				if #tLateSections > #tSections then
-					if SkuOptions.currentMenuPosition then
+					if tReadNode and SkuOptions.currentMenuPosition == tReadNode then
 						SkuOptions.currentMenuPosition.textFull = tLateSections
 					end
-					if SkuOptions.TTS and SkuOptions.TTS.IsVisible and SkuOptions.TTS:IsVisible() then
+					if tReadNode and SkuOptions.currentMenuPosition == tReadNode and SkuOptions.TTS and SkuOptions.TTS.IsVisible and SkuOptions.TTS:IsVisible() then
 						SkuOptions.TTS:Output(tLateSections, 1000)
 					end
 				end

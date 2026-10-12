@@ -218,7 +218,10 @@ local function tDmRanking(aHeader, aMeterType, aFetch, aWithRate, aRateLabel)
             return aHeader..": "..Sku.deEn("im Kampf nicht lesbar", "not readable in combat", "illisible en combat")
          end
          tRank = tRank + 1
-         local tClass = (SkuQuest and SkuQuest.classesFriendly and SkuQuest.classesFriendly[tSource.classFilename]) or ""
+         -- classFilename kann im Kampf geheim sein; als Tabellenschluessel waere das ein Fehler
+         local tClassKey = tSource.classFilename
+         if tDmSecret(tClassKey) then tClassKey = nil end
+         local tClass = (tClassKey ~= nil and SkuQuest and SkuQuest.classesFriendly and SkuQuest.classesFriendly[tClassKey]) or ""
          tText = tText.."\r\n"..tRank.." "..tName.." "..tClass.." "..tTotal
          if aWithRate then
             local tRate = tDmFormat(tSource.amountPerSecond)

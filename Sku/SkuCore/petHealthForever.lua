@@ -10,7 +10,7 @@
 -- beim Stall-Tausch) liest die Gesundheit des Begleiters und uebergibt sie direkt an
 -- Blizzards Sprachausgabe C_CombatAudioAlert.SpeakText - Sku selbst sieht den Wert nie.
 --
--- Taste: SKU_KEY_PETHEALTH (Standard Strg-Shift-K), wirkt auch im Kampf. Muster wie
+-- Taste: SKU_KEY_PETHEALTH (ohne Standardbelegung, im Tastenmenue frei waehlbar), wirkt auch im Kampf. Muster wie
 -- SkuQuest/QuestTarget.lua (Knopf + generischer Tastenbelegungs-Verteiler).
 -- Vollstaendig selbst-gesperrt: auf allen anderen Clients ein No-Op.
 -- =====================================================================
@@ -64,14 +64,13 @@ function SkuCore:UpdatePetHealthBinding()
    local kb = SkuOptions.db and SkuOptions.db.profile and SkuOptions.db.profile["SkuOptions"]
       and SkuOptions.db.profile["SkuOptions"].SkuKeyBinds
    local e = kb and kb["SKU_KEY_PETHEALTH"]
-   -- Lena nutzt das Makro "Pet HP": die frueher voreingestellte Taste Strg-Shift-K wird freigegeben (einmalig aus dem Profil entfernt).
-   if e and e.key == "CTRL-SHIFT-K" then e.key = "" end
-   if e and e.key2 == "CTRL-SHIFT-K" then e.key2 = "" end
    local k1 = e and e.key or ""
    local k2 = e and e.key2 or ""
 
    local b = tEnsureButton()
    if not b then return end
+   -- Makrotext bei jedem Update neu setzen (ausserhalb des Kampfes): sonst bleibt der Name des ersten Pets stehen.
+   b:SetAttribute("macrotext1", tBuildMacro())
    pcall(ClearOverrideBindings, b)
    if k1 == "" and k2 == "" then return end
    -- No fifth argument: the click must arrive as "LeftButton" so the secure template reads

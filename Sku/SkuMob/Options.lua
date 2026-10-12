@@ -398,14 +398,27 @@ local function tBuildTargetMenu(aParent)
 		end, L["MOB_InviteToGroupTip"])
 
 		tAddAction(aParent, L["MOB_AddFriend"], function()
-			local n = UnitName("target")
+			local n = Sku.SafeName("target")   -- in Instanzen kann der Name geheim sein
 			if not n then return end
+			-- C_FriendList.AddFriend ist auf Forever gesperrt (HasRestrictions) und meldet nur ADDON_ACTION_FORBIDDEN: Erfolg erst
+			-- ansagen, wenn nach dem Aufruf keine Sperre gemeldet wurde.
+			local tHit
+			local tFrame = CreateFrame("Frame")
+			tFrame:SetScript("OnEvent", function(_, _, aAddon) if aAddon == "Sku" then tHit = true end end)
+			tFrame:RegisterEvent("ADDON_ACTION_FORBIDDEN")
 			if _G.C_FriendList and _G.C_FriendList.AddFriend then
-				_G.C_FriendList.AddFriend(n)
+				pcall(_G.C_FriendList.AddFriend, n)
 			elseif _G.AddFriend then
-				AddFriend(n)
+				pcall(AddFriend, n)
 			end
-			tSay(n .. L["MOB_FriendAdded"])
+			C_Timer.After(0.3, function()
+				tFrame:UnregisterAllEvents()
+				if tHit then
+					tSay(Sku.deEn("Freund hinzufügen wurde vom Spiel blockiert", "Adding the friend was blocked by the game", "L'ajout de l'ami a été bloqué par le jeu"))
+				else
+					tSay(n .. L["MOB_FriendAdded"])
+				end
+			end)
 		end, L["MOB_AddFriendTip"])
 
 		tAddAction(aParent, L["MOB_ToggleIgnore"], function()

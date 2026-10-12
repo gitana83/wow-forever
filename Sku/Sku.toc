@@ -1,7 +1,7 @@
 ﻿## Interface: 20506, 11509, 16001
-## Title: Sku Forever v1.7
+## Title: Sku Forever v1.8
 ## SavedVariables: SkuOptionsDB, SkuTranslatedData, SkuErrorLog, SkuDebugLog
-## Version: 1.7
+## Version: 1.8
 
 SkuPerfFileStamp.lua
 
