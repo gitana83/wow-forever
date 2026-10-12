@@ -21,8 +21,6 @@ ist das ZIP der neuesten Version unter
    `SkuBeaconSoundsets`, `SkuCustomBeaconsAdditional`, `SkuCustomBeaconsEssential`)
    sind **nicht** enthalten. Sie sind unverändert und kommen aus der originalen
    Sku-Auslieferung.
-3. Im Spiel mit `/reload` oder beim nächsten Start ist Sku bereit. Das Menü wird
-   nach dem Login still vorbereitet, ein vorheriger Tastendruck ist nicht nötig.
 
 ## Was gegenüber dem Original geändert wurde
 
