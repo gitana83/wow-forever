@@ -3019,7 +3019,8 @@ local function tBuildPlayerSpellsFrame(aParentChilds)
 	local tTabs = {
 		{ id = tFrame.specTabID, text = _G.TALENT_FRAME_TAB_LABEL_SPEC or _G.SPECIALIZATION },
 		{ id = tFrame.talentTabID, text = _G.TALENT_FRAME_TAB_LABEL_TALENTS or _G.TALENTS },
-		{ id = tFrame.spellBookTabID, text = _G.TALENT_FRAME_TAB_LABEL_SPELLBOOK or _G.SPELLBOOK },
+		-- Zauberbuch-Reiter bewusst nicht im Menue: ohne Inhalt, der Reiter liesse sich nur umschalten (12.10.2026). Das Zauberbuch
+		-- steht in den Aktionsleisten (Umschalt+F11).
 	}
 	for _, tTab in ipairs(tTabs) do
 		if tTab.id and tFrame.IsTabAvailable and tFrame:IsTabAvailable(tTab.id) then

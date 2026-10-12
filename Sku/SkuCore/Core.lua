@@ -2696,7 +2696,7 @@ function SkuCore:PLAYER_DEAD(...)
 	--dprint("UnitIsDead", UnitIsDead("player"))
 end
 function SkuCore:AUTOFOLLOW_BEGIN(event, target, ...)
-	--dprint("AUTOFOLLOW_BEGIN", event, target, ...)
+	dprint("AUTOFOLLOW_BEGIN", event, target, ...)
 	SkuStatus.followEndFlag = false
 	SkuStatus.followUnitName = target or UnitName("TARGET")
 	if SkuStatus.follow == 0 then
@@ -2725,7 +2725,7 @@ function SkuCore:AUTOFOLLOW_BEGIN(event, target, ...)
 			--end
 		--end)
 	end
-	SkuOptions.Voice:OutputString("sound-on3_1", false, false, 0.2, false)
+	SkuOptions.Voice:OutputString("sound-on3_1", false, false, 0.2, true)
 	SkuOptions:SendTrackingStatusUpdates("F-1")
 	if SkuStatus.followUnitName then
 		SkuOptions:SendTrackingStatusUpdates("FN-"..SkuStatus.followUnitName)
@@ -2736,14 +2736,15 @@ end
 -- that SkuStatus.follow was reset -- and it has never been missed in practice. No
 -- second, redundant disarm here.
 function SkuCore:AUTOFOLLOW_END(event, ...)
-	--dprint("AUTOFOLLOW_END")
+	dprint("AUTOFOLLOW_END", SkuStatus.follow)
 	SkuStatus.followEndFlag = true
 	C_Timer.After(0.1, function()
 		if SkuStatus.followEndFlag == true then
 			if SkuStatus.follow ~= 0 then
 				SkuStatus.follow = 0
 				if SkuStatus.follow == 0 then
-					SkuOptions.Voice:OutputString("sound-off2", false, false, 0.2, false)
+					-- doNotOverwrite=true: im Kampf raeumt jede Ansage mit "ueberschreiben" die Warteschlange, und der Ton ging dabei verloren
+					SkuOptions.Voice:OutputString("sound-off2", false, false, 0.2, true)
 					SkuStatus.followUnitName = ""
 				end
 				if SkuStatus.followUnitId then
@@ -2759,6 +2760,28 @@ function SkuCore:AUTOFOLLOW_END(event, ...)
 		end
 	end)
 end
+
+-- [Forever] Ersatzweg fuer verlorenes Folgen: Reisst das Folgen ab, weil das Ziel zu weit weg ist, meldet das Spiel das ueber die
+-- Fehlermeldung "Ziel ist zu weit entfernt", AUTOFOLLOW_END kam dabei nicht zuverlaessig (kein Ton). Kommt die Meldung, waehrend Sku
+-- noch "folgen" glaubt, und folgt innerhalb von 0.4 s weder ein AUTOFOLLOW_END noch ein neues AUTOFOLLOW_BEGIN, laeuft derselbe
+-- Abschluss wie bei AUTOFOLLOW_END (Ton sound-off2, Status zurueck).
+local tFollowLostFrame = CreateFrame("Frame")
+tFollowLostFrame:RegisterEvent("UI_ERROR_MESSAGE")
+tFollowLostFrame:SetScript("OnEvent", function(_, _, _, aMessage)
+	pcall(function()
+		if not SkuStatus or not SkuStatus.follow or SkuStatus.follow == 0 then return end
+		if type(aMessage) ~= "string" or Sku.IsSecret(aMessage) then return end
+		dprint("follow active, error message:", aMessage)
+		if aMessage ~= _G.ERR_AUTOFOLLOW_TOO_FAR then return end
+		dprint("follow lost: too far", aMessage)
+		local tStartedAt = SkuStatus.follow
+		C_Timer.After(0.4, function()
+			if SkuStatus.follow ~= 0 and SkuStatus.follow == tStartedAt and SkuStatus.followEndFlag ~= true then
+				SkuCore:AUTOFOLLOW_END("AUTOFOLLOW_END")
+			end
+		end)
+	end)
+end)
 function SkuCore:PLAYER_UPDATE_RESTING(...)
 	--dprint("PLAYER_UPDATE_RESTING", ...)
 end
@@ -3069,8 +3092,8 @@ end
 -- Evidence (BugGrabber + SkuDebugLog, session 1382):
 --   [ADDON_ACTION_BLOCKED] ... [C]: in function 'FollowUnit'
 --     Sku/SkuCore/Core.lua:2354: in function 'UnfollowOnCast'   <- from UNIT_SPELLCAST_START
---   followcast unfollow call, was following: Hexbeth
---   followcast unfollow check: followUnitName now: Hexbeth      <- unchanged => never ran
+--   followcast unfollow call, was following: Name
+--   followcast unfollow check: followUnitName now: Name      <- unchanged => never ran
 -- AUTOFOLLOW_END never fired, so the call was blocked, not merely ineffective.
 -- FollowUnit is protected and needs a hardware event; UNIT_SPELLCAST_START /
 -- UNIT_SPELLCAST_CHANNEL_START are server events, so there is no path from "the
@@ -4401,9 +4424,22 @@ end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 function SkuCore:MERCHANT_SHOW(...)
-	--dprint("MERCHANT_SHOW")
+	dprint("MERCHANT_SHOW")
 	SkuCore:CheckFrames()
 	SkuOptions:StopSounds(5)
+	-- [Forever] Beim zweiten Haendler kurz nach dem ersten oeffneten sich die Taschen nicht mit (Blizzards MerchantFrame_OnShow ruft
+	-- OpenAllBags, das aber nichts tat), im Menue stand dann nur "Haendler" und man kam nicht zu den Taschen. Fehlen die Taschen
+	-- nach dem Oeffnen, werden sie hier selbst geoeffnet (ausser im Kampf, dort ist das Oeffnen gesperrt).
+	C_Timer.After(0.3, function()
+		if InCombatLockdown and InCombatLockdown() then return end
+		if not (_G.MerchantFrame and _G.MerchantFrame:IsVisible()) then return end
+		local tBags = _G["ContainerFrame1"]
+		if tBags and tBags:IsVisible() then return end
+		dprint("MERCHANT_SHOW: Taschen nicht offen, oeffne selbst")
+		if _G.OpenAllBags then pcall(_G.OpenAllBags) end
+		if not (tBags and tBags:IsVisible()) and _G.OpenBackpack then pcall(_G.OpenBackpack) end
+		SkuCore:CheckFrames()
+	end)
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------

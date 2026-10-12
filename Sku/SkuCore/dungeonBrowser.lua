@@ -489,7 +489,8 @@ local function tGetSearchResults()
       end
    end
    if not ids and _G.C_LFGList.GetSearchResults then
-      local r1, r2 = _G.C_LFGList.GetSearchResults()
+      local okS, r1, r2 = pcall(_G.C_LFGList.GetSearchResults)
+      if not okS then r1, r2 = nil, nil end
       if type(r1) == "table" then ids = r1
       elseif type(r1) == "number" and type(r2) == "table" then ids = r2 end
    end
@@ -727,6 +728,21 @@ function DungeonBrowser:DoEnroll()
       if d.selection[id] then ids[#ids + 1] = id end
    end
    table.sort(ids)
+   -- Gespeicherte Auswahl kann Aktivitaeten enthalten, die dieser Figur gar nicht (mehr) angeboten werden (alter Stand, andere Stufe).
+   -- Das Spiel lehnt dann die ganze Anmeldung ab (12.10.2026: Aktivitaet 853 neben 1984). Nur angebotene Aktivitaeten senden.
+   local tOffered = tRawActivityIDs(d.listCategory or LFG_CATEGORY_DUNGEON)
+   if type(tOffered) == "table" and #tOffered > 0 then
+      local tSet, tKept, tDropped = {}, {}, 0
+      for _, oid in ipairs(tOffered) do tSet[oid] = true end
+      for _, id in ipairs(ids) do
+         if tSet[id] then tKept[#tKept + 1] = id else tDropped = tDropped + 1; d.selection[id] = nil end
+      end
+      if tDropped > 0 and #tKept > 0 then
+         dprint("dungeonBrowser", "Auswahl bereinigt", { dropped = tDropped, kept = #tKept })
+         tSayChat(string.format(deEn("%d nicht verfügbare Dungeons aus der Auswahl entfernt.", "%d unavailable dungeons removed from the selection."), tDropped), "ff8800")
+         ids = tKept
+      end
+   end
    local listed = tIsListed()
    if #ids == 0 then tSayChat(L.noSelection, "ff8800"); tSay(L.noSelection, true); return end
    if not (_G.C_LFGList and _G.C_LFGList.CreateListing and _G.C_LFGList.UpdateListing) then tSayChat(L.unavailable, "ff8800"); return end
@@ -742,8 +758,34 @@ function DungeonBrowser:DoEnroll()
    -- Genau die Felder, die Blizzards eigenes Fenster sendet (LFGListingMixin:CreateOrUpdateListing): activityIDs, newPlayerFriendly.
    local data = { activityIDs = ids, newPlayerFriendly = d.newPlayerFriendly and true or false }
    local fn = listed and _G.C_LFGList.UpdateListing or _G.C_LFGList.CreateListing
+   -- Diagnose: was genau wird angemeldet (Name, Stufen, Kategorie, Gruppe, Spielerzahl, echte Mindeststufe).
+   local tPlayerLevel = (_G.UnitLevel and _G.UnitLevel("player")) or 0
+   for _, id in ipairs(ids) do
+      local okT, t = pcall(_G.C_LFGList.GetActivityInfoTable, id)
+      if okT and type(t) == "table" then
+         dprint("dungeonBrowser", "enroll activity", { id = id, name = tostring(t.fullName), minLevel = tostring(t.minLevel), maxLevel = tostring(t.maxLevel),
+            minSug = tostring(t.minLevelSuggestion), maxSug = tostring(t.maxLevelSuggestion), cat = tostring(t.categoryID),
+            group = tostring(t.groupFinderActivityGroupID), maxPlayers = tostring(t.maxNumPlayers), player = tPlayerLevel })
+      else
+         dprint("dungeonBrowser", "enroll activity: keine Daten", { id = id })
+      end
+   end
    local ok, res = pcall(fn, data)
    dprint("dungeonBrowser", listed and "UpdateListing" or "CreateListing", { count = #ids, ok = ok, result = tostring(res) })
+   -- Wird die Auswahl als Ganzes abgelehnt, einzeln versuchen (ein unpassender Dungeon in der Auswahl lehnt sonst alles ab). Alles im selben
+   -- Tastendruck (Hardware-Kontext); es wird der erste Dungeon genommen, den das Spiel annimmt, und das angesagt.
+   if ok and res == false and #ids > 1 then
+      for _, id in ipairs(ids) do
+         local ok2, res2 = pcall(fn, { activityIDs = { id }, newPlayerFriendly = data.newPlayerFriendly })
+         dprint("dungeonBrowser", "Einzelversuch", { id = id, ok = ok2, result = tostring(res2) })
+         if ok2 and res2 ~= false then
+            local ai = tActivityInfo(id)
+            tSayChat(deEn("Nur ", "Only ") .. ((ai and ai.name) or tostring(id)) .. deEn(" wurde angenommen, die anderen Dungeons nicht.", " was accepted, the other dungeons were not."), "ff8800")
+            ok, res = ok2, res2
+            break
+         end
+      end
+   end
    if not ok then tSayChat(L.enrollFailed .. tostring(res), "ff8800"); return end
    if res == false then tSayChat(L.enrollFailed .. deEn("abgelehnt", "rejected"), "ff8800"); tSay(L.enrollFailed .. deEn("abgelehnt", "rejected"), true); return end
    tApplyRoles()
@@ -1548,7 +1590,7 @@ local tLFGEventsFrame
 local function tHookLFGEvents()
    if tLFGEventsFrame then
       tLFGEventsFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
-      tLFGEventsFrame:RegisterEvent("LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED")
+      pcall(tLFGEventsFrame.RegisterEvent, tLFGEventsFrame, "LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED")
       tLFGEventsFrame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
       pcall(tLFGEventsFrame.RegisterEvent, tLFGEventsFrame, "LFG_LIST_SEARCH_FAILED")
       return
@@ -1556,7 +1598,7 @@ local function tHookLFGEvents()
    local f = CreateFrame("Frame")
    tLFGEventsFrame = f
    f:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
-   f:RegisterEvent("LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED")
+   pcall(f.RegisterEvent, f, "LFG_LIST_AVAILABLE_ACTIVITY_LIST_UPDATED") -- in der Forever-Doku nicht aufgefuehrt; ein unbekanntes Ereignis darf das Modul nicht abbrechen
    f:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
    pcall(f.RegisterEvent, f, "LFG_LIST_SEARCH_FAILED") -- nicht jeder Client kennt das Ereignis
    f:SetScript("OnEvent", function(self, event)

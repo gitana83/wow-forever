@@ -786,9 +786,11 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 			local tOk, tVal = pcall(UnitThreatSituation, aUnit, aUnitId)
 			if not tOk then return nil end
 			if Sku.IsSecret(tVal) then
+				-- Unlesbar. Frueher galt "unlesbar, aber vorhanden" als Bedrohung; im Kampf kann die Abfrage aber auch fuer fremde
+				-- Gegner einen verdeckten Wert liefern, und jeder angeschaute Gegner bekam eine Farbe (12.10.2026). Jetzt entscheidet
+				-- allein die Pruefung unten, ob der Gegner mit uns kaempft.
 				tThreatSecret = true
-				local tOk2, tHas = pcall(function() return tVal and true or false end)
-				return (tOk2 and tHas) and true or nil
+				return nil
 			end
 			return tVal or nil
 		end
@@ -826,7 +828,15 @@ function SkuMob:PLAYER_TARGET_CHANGED(event, aUnitId)
 						-- sein Ziel ist einer von uns
 						local tOk1, tSame1 = pcall(UnitIsUnit, tEnemyTarget, tUnit)
 						-- oder einer von uns hat ihn im Ziel
-						local tOk2, tSame2 = pcall(UnitIsUnit, tUnit.."target", aUnitId)
+						-- Das eigene Ziel zaehlt NICHT (wer einen fremden Gegner nur anschaut, loest sonst eine Farbe aus); bei Gruppe/Tier nur,
+						-- wenn sie selbst im Kampf sind (12.10.2026).
+						local tOk2, tSame2 = false, nil
+						if tUnit ~= "player" then
+							local tOkC2, tUnitFights = pcall(UnitAffectingCombat, tUnit)
+							if tOkC2 and tUnitFights == true then
+								tOk2, tSame2 = pcall(UnitIsUnit, tUnit.."target", aUnitId)
+							end
+						end
 						if (tOk1 and not Sku.IsSecret(tSame1) and tSame1 == true) or (tOk2 and not Sku.IsSecret(tSame2) and tSame2 == true) then
 							status = true
 							break

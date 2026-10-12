@@ -112,6 +112,27 @@ function SkuOptions:CloseMenu()
 end
 
 ---------------------------------------------------------------------------------------------------------------------------------------
+-- Baut den Menuebaum still auf (ohne Oeffnen, ohne Ansage). Ohne fertigen Baum verwirft Skus Tastenbehandlung den ersten Druck jeder
+-- Sku-Taste, bis einmal Shift-F1 den Baum gebaut hat. Wird nach dem Login einmal ausserhalb von Kampf und Bewegung aufgerufen.
+function SkuOptions:WarmUpMenuTree()
+	if SkuOptions.Menu and #SkuOptions.Menu > 0 then return true end
+	local tFrame = _G["OnSkuOptionsMain"]
+	if not tFrame or tFrame:IsVisible() == true then return false end
+	if InCombatLockdown() then return false end
+	if SkuCore and SkuCore.IsPlayerMoving and SkuCore:IsPlayerMoving() == true then return false end
+	local tKbds = SkuSettings:Sub("SkuOptions").SkuKeyBinds
+	local tKey = tKbds and tKbds["SKU_KEY_OPENMENU"] and tKbds["SKU_KEY_OPENMENU"].key
+	if not tKey then return false end
+	SkuOptions.tBuildTreeOnly = true
+	local tOk, tErr = pcall(tFrame:GetScript("OnClick"), tFrame, tKey)
+	SkuOptions.tBuildTreeOnly = nil
+	-- falls die Taste doch vorgemerkt wurde (Bewegung/Kampf), darf das Menue nicht spaeter von selbst aufgehen
+	if SkuCore and SkuCore.ClearDeferredMenuOpen then pcall(SkuCore.ClearDeferredMenuOpen, SkuCore) end
+	dprint("WarmUpMenuTree", tOk, tErr, SkuOptions.Menu and #SkuOptions.Menu)
+	return tOk and SkuOptions.Menu ~= nil and #SkuOptions.Menu > 0
+end
+
+---------------------------------------------------------------------------------------------------------------------------------------
 function SkuOptions:IsMenuOpen()
 	if _G["OnSkuOptionsMain"] and _G["OnSkuOptionsMain"]:IsVisible() == true then
 		return true
@@ -1989,6 +2010,31 @@ function SkuOptions:CreateMainFrame()
 			return
 		end
 
+		-- Wuerfel-Tasten MUESSEN vor dem Bewegungs-Gate unten stehen: Beute wird meist im Laufen verteilt, und hinter dem Gate
+		-- wurde der Druck nur als "Menue nach dem Laufen oeffnen" vorgemerkt, das Wuerfeln selbst lief nie.
+		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLNEED") then
+			SkuOptions:DoRoll("need")
+			return
+		end
+		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLGREED") then
+			SkuOptions:DoRoll("greed")
+			return
+		end
+		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLPASS") then
+			SkuOptions:DoRoll("pass")
+			return
+		end
+		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLINFO") then
+			local tRollID, tItem = SkuOptions:GetCurrentRollItem()
+			if tRollID and tItem then
+				SkuOptions.nextRollFrameNumber = tRollID
+				SkuOptions.Voice:OutputStringBTtts(SkuOptions:RollItemText(tItem), true, true, 0.3, true, nil, nil, 2)
+			else
+				SkuOptions.Voice:OutputString(Sku.deEn("Kein Würfeln offen", "no roll open", "aucun jet ouvert"), true, true, 0.3, true)
+			end
+			return
+		end
+
 		--toggle mm warning background sound
 		if SkuOptions.db.profile["SkuNav"].showSkuMM == true or SkuOptions.db.profile["SkuNav"].showRoutesOnMinimap == true then
 			SkuOptions:StartStopBackgroundSound(false, nil, "map")
@@ -2041,29 +2087,6 @@ function SkuOptions:CreateMainFrame()
 			SkuOptions.Voice:OutputString(tState, true, true, 0.3, true)
 		end
 	
-		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLNEED") then
-			SkuOptions:DoRoll("need")
-			return
-		end
-		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLGREED") then
-			SkuOptions:DoRoll("greed")
-			return
-		end
-		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLPASS") then
-			SkuOptions:DoRoll("pass")
-			return
-		end
-		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_ROLLINFO") then
-			local tRollID, tItem = SkuOptions:GetCurrentRollItem()
-			if tRollID and tItem then
-				SkuOptions.nextRollFrameNumber = tRollID
-				SkuOptions.Voice:OutputStringBTtts(SkuOptions:RollItemText(tItem), true, true, 0.3, true, nil, nil, 2)
-			else
-				SkuOptions.Voice:OutputString(Sku.deEn("Kein Würfeln offen", "no roll open", "aucun jet ouvert"), true, true, 0.3, true)
-			end
-			return
-		end
-
 		if SkuOptions:SkuKeyBindsMatchKey(a, "SKU_KEY_QUESTSHARE") then
 			SkuOptions.TooltipReaderText = ""
 
@@ -2608,6 +2631,12 @@ function SkuOptions:CreateMainFrame()
 				-- W7: "Local" is no longer a static, always-present root entry. It is
 				-- spliced in/out by SkuCore:UpdateLocalRootEntry() (below, every open)
 				-- so it only appears when a window/contributor is actually open.
+			end
+
+			-- Stiller Aufbau nach dem Login (SkuOptions:WarmUpMenuTree): der Menuebaum steht jetzt, das Menue wird aber weder
+			-- geoeffnet noch angesagt. Damit ist das einmalige Shift-F1 nach jedem Start nicht mehr noetig.
+			if SkuOptions.tBuildTreeOnly == true then
+				return
 			end
 
 			-- W7: evaluate the dynamic root entries on every open (the root above is
@@ -5239,6 +5268,15 @@ function SkuOptions:PLAYER_ENTERING_WORLD(...)
 
 		SkuSettings:Sub("SkuOptions", nil, "global")
 		SkuSettings:Sub("SkuOptions", nil, "global").devmode = SkuSettings:Sub("SkuOptions", nil, "global").devmode or false
+
+		-- Menuebaum still vorbauen (siehe SkuOptions:WarmUpMenuTree); klappt es wegen Kampf/Bewegung nicht, alle 3 s erneut (max. 10 Versuche)
+		local function tWarmUpTry(aTry)
+			local tOk, tDone = pcall(SkuOptions.WarmUpMenuTree, SkuOptions)
+			if (not tOk or tDone ~= true) and aTry < 10 then
+				C_Timer.After(3, function() tWarmUpTry(aTry + 1) end)
+			end
+		end
+		C_Timer.After(5, function() tWarmUpTry(1) end)
 
 		-- request guild roster after a short delay so the client is ready
 		C_Timer.After(3, function()

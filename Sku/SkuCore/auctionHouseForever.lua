@@ -760,6 +760,25 @@ local function tAhItemTooltipText(aItemKey, aLink)
 	pcall(function() tShowQuality = SkuOptions.db.profile["SkuCore"].itemSettings.ShowItemQality == true end)
 	if tQualityText and tShowQuality and tOut[1] then tOut[1] = tOut[1].." ("..tQualityText..")" end
 	if tLevel and #tOut > 0 then table.insert(tOut, 2, L["Item Level"]..": "..tLevel) end
+	-- Benoetigte Spielerstufe: fehlt in den Tooltip-Daten der Auktion, daher aus den Gegenstandsdaten ergaenzen (nur wenn keine Zeile sie schon nennt).
+	if #tOut > 0 then
+		local tItemRef = aLink or (aItemKey and aItemKey.itemID)
+		local tMinLevel
+		if tItemRef then
+			local tOkM, _, _, _, _, tMin = pcall(C_Item.GetItemInfo, tItemRef)
+			if tOkM and type(tMin) == "number" and not Sku.IsSecret(tMin) then tMinLevel = tMin end
+		end
+		if tMinLevel and tMinLevel > 1 then
+			local tFormat = _G.ITEM_MIN_LEVEL or "Requires Level %d"
+			local tPattern = string.gsub(tFormat, "[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0")
+			tPattern = "^"..string.gsub(tPattern, "%%d", "%%d+")
+			local tFound = false
+			for _, tLineText in ipairs(tOut) do
+				if string.find(tLineText, tPattern) then tFound = true break end
+			end
+			if not tFound then table.insert(tOut, (tLevel and 3) or 2, string.format(tFormat, tMinLevel)) end
+		end
+	end
 	if #tOut == 0 then return nil end
 	return SkuUtil:Unescape(table.concat(tOut, "\r\n"))
 end
