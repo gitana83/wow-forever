@@ -1,5 +1,10 @@
 # Sku für WoW Forever
 
+> **Hinweis: Dieses Repository wird nicht mehr weiterentwickelt und es gibt keine neuen Releases.**
+> Die Forever-Anpassungen wandern Stück für Stück in den Sku-Hauptcode:
+> <https://github.com/Sku75/Sku-WoW-Addon-TBC> (Pull Requests nach `dev/FOREVER-PRS.md`).
+> Dieses Repository bleibt als Nachschlagewerk bestehen. Die vorhandenen Releases (bis 1.8) bleiben unverändert.
+
 Das **Sku**-Addon (Screenreader-Addon für blinde und sehbehinderte WoW-Spieler),
 angepasst für **WoW Forever** (Blizzards neuer Classic-Client, intern „Camelot",
 Interface 16001). Basis ist Sku 43.8, die Forever-Version zählt eigenständig als
