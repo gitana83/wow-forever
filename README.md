@@ -19,8 +19,6 @@ kopieren und einfügen:
    `SkuBeaconSoundsets`, `SkuCustomBeaconsAdditional`, `SkuCustomBeaconsEssential`)
    sind **nicht** enthalten. Sie sind unverändert und kommen aus der originalen
    Sku-Auslieferung.
-3. Im Spiel nach jedem Login einmal **Shift-F1** drücken (Menü kurz auf und zu),
-   sonst bleiben andere Sku-Tasten beim ersten Versuch stumm.
 
 ## Was gegenüber dem Original geändert wurde
 
